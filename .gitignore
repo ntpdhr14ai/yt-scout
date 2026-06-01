@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.pyo
+*.png
+thread.log
+debug_search.png
+ss_*.png

@@ -1,0 +1,672 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>YT Scout</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0f0f0f;
+      --surface: #1a1a1a;
+      --surface2: #242424;
+      --border: #333;
+      --accent: #ff0000;
+      --accent2: #ff4444;
+      --text: #e8e8e8;
+      --muted: #888;
+      --green: #22c55e;
+      --yellow: #eab308;
+      --blue: #3b82f6;
+      --radius: 8px;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      min-height: 100vh;
+      padding: 24px;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 28px;
+    }
+    header svg { flex-shrink: 0; }
+    header h1 { font-size: 1.8rem; font-weight: 700; letter-spacing: -0.5px; }
+    header span { color: var(--accent); }
+    header p { color: var(--muted); font-size: 0.85rem; margin-top: 2px; }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+      margin-bottom: 20px;
+    }
+
+    .form-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+      gap: 14px;
+    }
+    .form-group label {
+      display: block;
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 6px;
+    }
+    .form-group input,
+    .form-group select {
+      width: 100%;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      padding: 9px 12px;
+      font-size: 0.9rem;
+      outline: none;
+      transition: border-color .2s;
+    }
+    .form-group input:focus,
+    .form-group select:focus { border-color: var(--accent); }
+    .form-group.wide { grid-column: 1 / -1; }
+
+    .btn-row {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+      margin-top: 16px;
+    }
+
+    button {
+      cursor: pointer;
+      border: none;
+      border-radius: 6px;
+      font-size: 0.9rem;
+      font-weight: 600;
+      padding: 10px 20px;
+      transition: opacity .2s, transform .1s;
+    }
+    button:active { transform: scale(0.97); }
+    button:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+
+    #startBtn {
+      background: var(--accent);
+      color: #fff;
+      min-width: 130px;
+    }
+    #startBtn:not(:disabled):hover { background: var(--accent2); }
+
+    #stopBtn {
+      background: #7c2020;
+      color: #fff;
+      min-width: 80px;
+      display: none;
+    }
+    #stopBtn:not(:disabled):hover { background: #a33030; }
+
+    .btn-export {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      color: var(--text);
+    }
+    .btn-export:hover { border-color: var(--accent); }
+
+    /* Progress */
+    #progressSection { display: none; }
+    .progress-bar-wrap {
+      background: var(--surface2);
+      border-radius: 100px;
+      height: 10px;
+      overflow: hidden;
+      margin: 10px 0 6px;
+    }
+    .progress-bar-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--accent), #ff6b6b);
+      border-radius: 100px;
+      transition: width .4s ease;
+      width: 0%;
+    }
+    #progressText { font-size: 0.82rem; color: var(--muted); }
+    #statusMsg {
+      font-size: 0.85rem;
+      color: var(--text);
+      margin-top: 6px;
+      min-height: 20px;
+    }
+
+    /* Cooldown */
+    #cooldownBanner {
+      background: #1c1200;
+      border: 1px solid #7c5c00;
+      border-radius: var(--radius);
+      padding: 14px 18px;
+      margin-bottom: 16px;
+      display: none;
+      align-items: center;
+      gap: 12px;
+    }
+    #cooldownBanner.visible { display: flex; }
+    #cooldownBanner .cd-icon { font-size: 1.4rem; }
+    #cooldownBanner .cd-text { flex: 1; }
+    #cooldownBanner .cd-title { font-weight: 600; color: var(--yellow); font-size: 0.9rem; }
+    #cooldownBanner .cd-timer { font-size: 1.6rem; font-weight: 700; color: var(--yellow); font-variant-numeric: tabular-nums; }
+
+    /* Results table */
+    #resultsSection { display: none; }
+    .results-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 14px;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+    .results-header h2 { font-size: 1.1rem; }
+    .results-header .count {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 100px;
+      padding: 2px 12px;
+      font-size: 0.8rem;
+      color: var(--muted);
+    }
+
+    .table-wrap { overflow-x: auto; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.84rem;
+      min-width: 900px;
+    }
+    thead tr { border-bottom: 1px solid var(--border); }
+    th {
+      text-align: left;
+      padding: 10px 12px;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      color: var(--muted);
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    td {
+      padding: 11px 12px;
+      border-bottom: 1px solid #1f1f1f;
+      vertical-align: top;
+    }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: var(--surface2); }
+
+    .channel-name a {
+      color: var(--text);
+      text-decoration: none;
+      font-weight: 600;
+    }
+    .channel-name a:hover { color: var(--accent); }
+    .channel-name .sub-url { color: var(--muted); font-size: 0.75rem; }
+
+    .badge {
+      display: inline-block;
+      border-radius: 4px;
+      padding: 2px 7px;
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.3px;
+    }
+    .badge-green  { background: #052e16; color: var(--green); }
+    .badge-red    { background: #2c0a0a; color: #f87171; }
+    .badge-blue   { background: #0c1a35; color: var(--blue); }
+    .badge-yellow { background: #1c1200; color: var(--yellow); }
+    .badge-gray   { background: #1e1e1e; color: var(--muted); }
+    /* TH inferred — light green */
+    .badge-th-inferred { background: #0d2e14; color: #86efac; }
+
+    .score-bar {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .score-num { font-weight: 700; min-width: 28px; }
+    .score-track {
+      flex: 1;
+      height: 6px;
+      background: var(--surface2);
+      border-radius: 100px;
+      overflow: hidden;
+      min-width: 50px;
+    }
+    .score-fill {
+      height: 100%;
+      border-radius: 100px;
+    }
+
+    .contact-cell { font-size: 0.78rem; }
+    .contact-cell a { color: var(--blue); text-decoration: none; }
+    .contact-cell a:hover { text-decoration: underline; }
+
+    .dash { color: var(--muted); }
+
+    /* Spinner */
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner {
+      width: 16px; height: 16px;
+      border: 2px solid #ffffff40;
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin .7s linear infinite;
+      display: inline-block;
+      vertical-align: middle;
+      margin-right: 6px;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <svg width="36" height="36" viewBox="0 0 36 36" fill="none">
+    <rect width="36" height="36" rx="8" fill="#ff0000"/>
+    <path d="M14 11.5l12 6.5-12 6.5V11.5z" fill="white"/>
+  </svg>
+  <div>
+    <h1>YT <span>Scout</span></h1>
+    <p>YouTube channel discovery &amp; analysis tool</p>
+  </div>
+</header>
+
+<!-- Cooldown banner -->
+<div id="cooldownBanner">
+  <div class="cd-icon">⏳</div>
+  <div class="cd-text">
+    <div class="cd-title" id="cdTitle">Cooldown active — next batch starts automatically</div>
+    <div class="cd-timer" id="cooldownTimer">10:00</div>
+  </div>
+</div>
+
+<!-- Search form -->
+<div class="card">
+  <div class="form-grid">
+    <div class="form-group wide">
+      <label>Search Keyword</label>
+      <input type="text" id="keyword" placeholder="e.g. travel vlog Thailand" />
+    </div>
+    <div class="form-group">
+      <label>Region</label>
+      <select id="region">
+        <option value="TH" selected>Thailand (TH)</option>
+        <option value="US">United States (US)</option>
+        <option value="GB">United Kingdom (GB)</option>
+        <option value="JP">Japan (JP)</option>
+        <option value="KR">South Korea (KR)</option>
+        <option value="SG">Singapore (SG)</option>
+        <option value="MY">Malaysia (MY)</option>
+        <option value="ID">Indonesia (ID)</option>
+        <option value="PH">Philippines (PH)</option>
+        <option value="VN">Vietnam (VN)</option>
+        <option value="AU">Australia (AU)</option>
+        <option value="DE">Germany (DE)</option>
+        <option value="FR">France (FR)</option>
+        <option value="IN">India (IN)</option>
+        <option value="BR">Brazil (BR)</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>Min Subscribers</label>
+      <input type="number" id="minSubs" value="1000" min="0" />
+    </div>
+    <div class="form-group">
+      <label>Max Subscribers</label>
+      <input type="number" id="maxSubs" value="500000" min="1" />
+    </div>
+    <div class="form-group">
+      <label>Batch Size (max {{ max_batch }})</label>
+      <input type="number" id="batchSize" value="5" min="1" max="{{ max_batch }}" />
+    </div>
+  </div>
+
+  <div class="btn-row">
+    <button id="startBtn" onclick="startScrape()">
+      Search Channels
+    </button>
+    <button id="stopBtn" onclick="stopScrape()">
+      Stop
+    </button>
+    <span id="limitNote" style="font-size:0.78rem;color:var(--muted)">
+      Max {{ max_batch }} channels per batch &bull; auto-continues with 10-min cooldown
+    </span>
+  </div>
+</div>
+
+<!-- Progress -->
+<div class="card" id="progressSection">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+    <span style="font-size:0.85rem;font-weight:600">Progress</span>
+    <span id="progressCount" style="font-size:0.82rem;color:var(--muted)">0 / 0</span>
+  </div>
+  <div class="progress-bar-wrap">
+    <div class="progress-bar-fill" id="progressFill"></div>
+  </div>
+  <div id="progressText">Initialising…</div>
+  <div id="statusMsg"></div>
+</div>
+
+<!-- Results -->
+<div id="resultsSection">
+  <div class="results-header">
+    <div style="display:flex;align-items:center;gap:10px">
+      <h2>Results</h2>
+      <span class="count" id="resultCount">0 channels</span>
+    </div>
+    <div style="display:flex;gap:8px">
+      <button class="btn-export" onclick="exportData('csv')">Export CSV</button>
+      <button class="btn-export" onclick="exportData('excel')">Export Excel</button>
+    </div>
+  </div>
+  <div class="card" style="padding:0">
+    <div class="table-wrap">
+      <table id="resultsTable">
+        <thead>
+          <tr>
+            <th>Channel</th>
+            <th>Subscribers</th>
+            <th>Location</th>
+            <th>Active</th>
+            <th>Videos/mo</th>
+            <th>Score</th>
+            <th>Avg Views<br><small style="text-transform:none;letter-spacing:0">Videos</small></th>
+            <th>Avg Views<br><small style="text-transform:none;letter-spacing:0">Shorts</small></th>
+            <th>Avg Views<br><small style="text-transform:none;letter-spacing:0">Live</small></th>
+            <th>Contact</th>
+          </tr>
+        </thead>
+        <tbody id="resultsBody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+  const MAX_BATCH = {{ max_batch }};
+  const COOLDOWN_SECS = {{ cooldown_secs }};
+  let pollTimer = null;
+  let cooldownTimer = null;
+  let cooldownEnd = 0;
+  let renderedCount = 0;  // rows already appended to the table
+
+  // -------------------------------------------------------------------------
+  // Formatters
+  // -------------------------------------------------------------------------
+
+  function fmtNum(n) {
+    if (n === null || n === undefined) return '<span class="dash">—</span>';
+    if (n === 'Pending Check') return '<span class="badge badge-yellow">Pending</span>';
+    if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+    if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
+    return n.toString();
+  }
+
+  function fmtTime(secs) {
+    const m = Math.floor(secs / 60).toString().padStart(2, '0');
+    const s = Math.floor(secs % 60).toString().padStart(2, '0');
+    return `${m}:${s}`;
+  }
+
+  function scoreColor(s) {
+    if (s >= 70) return '#22c55e';
+    if (s >= 40) return '#eab308';
+    return '#ef4444';
+  }
+
+  function locationBadge(r) {
+    const badge = r.location_badge || '?';
+    if (badge === 'TH')
+      return '<span class="badge badge-blue">TH</span>';
+    if (badge === 'TH inferred')
+      return '<span class="badge badge-th-inferred">TH ~</span>';
+    if (badge === '?')
+      return '<span class="badge badge-gray">?</span>';
+    return `<span class="badge badge-gray">${badge}</span>`;
+  }
+
+  // -------------------------------------------------------------------------
+  // Results rendering — append-only (Fix 2)
+  // -------------------------------------------------------------------------
+
+  function appendResults(newResults) {
+    if (!newResults.length) return;
+    const tbody = document.getElementById('resultsBody');
+    document.getElementById('resultsSection').style.display = 'block';
+
+    newResults.forEach(r => {
+      const score = r.score ?? 0;
+      const emails = (r.emails || []).map(e => `<a href="mailto:${e}">${e}</a>`).join('<br>');
+      const links = (r.links || []).slice(0, 3).map(l => {
+        const domain = l.replace(/https?:\/\//, '').split('/')[0];
+        return `<a href="${l}" target="_blank" rel="noopener">${domain}</a>`;
+      }).join('<br>');
+      const contact = [emails, links].filter(Boolean).join('<br>') || '<span class="dash">—</span>';
+
+      const row = document.createElement('tr');
+      row.innerHTML = `
+        <td class="channel-name">
+          <a href="${r.url}" target="_blank" rel="noopener">${r.name || r.url}</a>
+          <div class="sub-url">${(r.url || '').replace('https://www.youtube.com', '')}</div>
+        </td>
+        <td>${fmtNum(r.subs)}</td>
+        <td>${locationBadge(r)}</td>
+        <td>${r.active ? '<span class="badge badge-green">Active</span>' : '<span class="badge badge-gray">—</span>'}</td>
+        <td>${r.upload_freq != null ? r.upload_freq : '<span class="dash">—</span>'}</td>
+        <td>
+          <div class="score-bar">
+            <span class="score-num" style="color:${scoreColor(score)}">${score}</span>
+            <div class="score-track">
+              <div class="score-fill" style="width:${score}%;background:${scoreColor(score)}"></div>
+            </div>
+          </div>
+        </td>
+        <td>${fmtNum(r.avg_video_views)}</td>
+        <td>${fmtNum(r.avg_short_views)}</td>
+        <td>${fmtNum(r.avg_live_views)}</td>
+        <td class="contact-cell">${contact}</td>
+      `;
+      tbody.appendChild(row);
+    });
+
+    renderedCount += newResults.length;
+    document.getElementById('resultCount').textContent =
+      renderedCount + ' channel' + (renderedCount !== 1 ? 's' : '');
+  }
+
+  // -------------------------------------------------------------------------
+  // Cooldown UI
+  // -------------------------------------------------------------------------
+
+  function startCooldownUI(secondsLeft, isAutoBatch) {
+    cooldownEnd = Date.now() + secondsLeft * 1000;
+    document.getElementById('cdTitle').textContent = isAutoBatch
+      ? 'Cooldown active — next batch starts automatically'
+      : 'Cooldown active — protecting your session';
+    document.getElementById('cooldownBanner').classList.add('visible');
+
+    if (cooldownTimer) clearInterval(cooldownTimer);
+    cooldownTimer = setInterval(() => {
+      const left = Math.max(0, (cooldownEnd - Date.now()) / 1000);
+      document.getElementById('cooldownTimer').textContent = fmtTime(left);
+      if (left <= 0) {
+        clearInterval(cooldownTimer);
+        cooldownTimer = null;
+        // Auto-hide banner when countdown expires and no auto-batch is pending
+        if (!isAutoBatch) hideCooldown();
+      }
+    }, 500);
+  }
+
+  function hideCooldown() {
+    document.getElementById('cooldownBanner').classList.remove('visible');
+    if (cooldownTimer) { clearInterval(cooldownTimer); cooldownTimer = null; }
+  }
+
+  // -------------------------------------------------------------------------
+  // Poll loop
+  // -------------------------------------------------------------------------
+
+  async function pollStatus() {
+    try {
+      const resp = await fetch('/status');
+      const data = await resp.json();
+
+      const running    = data.running;
+      const autoBatch  = data.auto_batch;
+      const isActive   = running || autoBatch;
+
+      // Stop / Start button state
+      document.getElementById('stopBtn').style.display = isActive ? 'inline-block' : 'none';
+      document.getElementById('startBtn').disabled = isActive;
+
+      // Progress bar (only meaningful while running)
+      if (running) {
+        document.getElementById('progressSection').style.display = 'block';
+        const pct = data.total > 0 ? Math.round((data.progress / data.total) * 100) : 0;
+        document.getElementById('progressFill').style.width = pct + '%';
+        document.getElementById('progressCount').textContent = `${data.progress} / ${data.total}`;
+        document.getElementById('progressText').textContent = data.message || '';
+        document.getElementById('statusMsg').textContent = '';
+        hideCooldown();
+      } else if (autoBatch && data.cooldown_left > 0) {
+        // In cooldown between batches
+        document.getElementById('progressSection').style.display = 'none';
+        startCooldownUI(data.cooldown_left, true);
+        document.getElementById('statusMsg').textContent = data.message || '';
+      } else if (!isActive) {
+        // Fully done
+        document.getElementById('progressSection').style.display = 'none';
+        hideCooldown();
+        document.getElementById('startBtn').innerHTML = 'Search Channels';
+        if (data.error) {
+          document.getElementById('statusMsg').textContent = 'Error: ' + data.error;
+        }
+      }
+
+      // Append any new results
+      if (data.results_count > renderedCount) {
+        const rr = await fetch('/results');
+        const allResults = await rr.json();
+        appendResults(allResults.slice(renderedCount));
+      }
+
+      // Stop polling when fully idle
+      if (!isActive) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
+
+    } catch(e) {
+      console.error(e);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Actions
+  // -------------------------------------------------------------------------
+
+  async function startScrape() {
+    const keyword = document.getElementById('keyword').value.trim();
+    if (!keyword) { alert('Please enter a keyword'); return; }
+
+    const batchSize = Math.min(parseInt(document.getElementById('batchSize').value) || 5, MAX_BATCH);
+    document.getElementById('batchSize').value = batchSize;
+
+    const payload = {
+      keyword,
+      region: document.getElementById('region').value,
+      min_subs: parseInt(document.getElementById('minSubs').value) || 1000,
+      max_subs: parseInt(document.getElementById('maxSubs').value) || 500000,
+      batch_size: batchSize,
+    };
+
+    const btn = document.getElementById('startBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Searching…';
+
+    // Reset accumulated results on a fresh search
+    renderedCount = 0;
+    document.getElementById('resultsBody').innerHTML = '';
+    document.getElementById('resultCount').textContent = '0 channels';
+    document.getElementById('resultsSection').style.display = 'none';
+    document.getElementById('progressSection').style.display = 'block';
+    document.getElementById('statusMsg').textContent = '';
+    hideCooldown();
+
+    try {
+      const resp = await fetch('/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        alert(data.error || 'Failed to start');
+        btn.disabled = false;
+        btn.innerHTML = 'Search Channels';
+        document.getElementById('progressSection').style.display = 'none';
+        return;
+      }
+    } catch(e) {
+      alert('Server error: ' + e.message);
+      btn.disabled = false;
+      btn.innerHTML = 'Search Channels';
+      document.getElementById('progressSection').style.display = 'none';
+      return;
+    }
+
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = setInterval(pollStatus, 2000);
+  }
+
+  async function stopScrape() {
+    document.getElementById('stopBtn').disabled = true;
+    try {
+      await fetch('/stop', { method: 'POST' });
+    } catch(e) {
+      console.error(e);
+    }
+  }
+
+  function exportData(format) {
+    window.location.href = `/export/${format}`;
+  }
+
+  // -------------------------------------------------------------------------
+  // Init: restore state on page load
+  // -------------------------------------------------------------------------
+  fetch('/status').then(r => r.json()).then(d => {
+    if (d.running || d.auto_batch) {
+      // Resume polling for an in-progress run
+      document.getElementById('startBtn').disabled = true;
+      document.getElementById('stopBtn').style.display = 'inline-block';
+      document.getElementById('progressSection').style.display = 'block';
+      if (pollTimer) clearInterval(pollTimer);
+      pollTimer = setInterval(pollStatus, 2000);
+    } else if (d.cooldown_left > 0) {
+      startCooldownUI(d.cooldown_left, false);
+    }
+    // Render any already-collected results
+    if (d.results_count > 0) {
+      fetch('/results').then(r => r.json()).then(results => {
+        appendResults(results);
+      });
+    }
+  });
+</script>
+</body>
+</html>
