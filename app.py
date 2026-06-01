@@ -267,7 +267,7 @@ def _flatten_row(r: dict) -> dict:
         "url": _fmt(r.get("url")),
         "subscribers": _fmt(r.get("subs")),
         "location_badge": _fmt(r.get("location_badge")),
-        "active": "Yes" if r.get("active") else "No",
+        "active": r.get("active", "Inactive"),
         "upload_freq": _fmt(r.get("upload_freq")),
         "score": _fmt(r.get("score")),
         "country": _fmt(r.get("country")),

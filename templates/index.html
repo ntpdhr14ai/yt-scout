@@ -407,6 +407,13 @@
   // Formatters
   // -------------------------------------------------------------------------
 
+  function activeBadge(s) {
+    if (s === 'Active')   return '<span class="badge badge-green">Active</span>';
+    if (s === 'Slow')     return '<span class="badge badge-yellow">Slow</span>';
+    if (s === 'Inactive') return '<span class="badge badge-gray">Inactive</span>';
+    return '<span class="badge badge-gray">—</span>';
+  }
+
   function fmtNum(n) {
     if (n === null || n === undefined) return '<span class="dash">—</span>';
     if (n === 'Pending Check') return '<span class="badge badge-yellow">Pending</span>';
@@ -464,7 +471,7 @@
         </td>
         <td>${fmtNum(r.subs)}</td>
         <td>${locationBadge(r)}</td>
-        <td>${r.active ? '<span class="badge badge-green">Active</span>' : '<span class="badge badge-gray">—</span>'}</td>
+        <td>${activeBadge(r.active)}</td>
         <td>${r.upload_freq != null ? r.upload_freq : '<span class="dash">—</span>'}</td>
         <td>
           <div class="score-bar">
