@@ -1,9 +1,14 @@
 import re
+import sys
 import random
 import asyncio
 from urllib.parse import quote_plus
 from playwright.async_api import async_playwright
 from playwright_stealth import Stealth
+
+# Force UTF-8 stdout so Thai channel names don't crash print() on Windows
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 _stealth = Stealth()
 
@@ -48,7 +53,7 @@ _COUNTRY_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Thai digit → Arabic digit translation table
+# Thai digit ->Arabic digit translation table
 _THAI_DIGIT_MAP = str.maketrans("๐๑๒๓๔๕๖๗๘๙", "0123456789")
 
 # Words that indicate an upload-timestamp span
@@ -70,16 +75,16 @@ _VIEW_FALLBACK_SELECTORS = [
 # ---------------------------------------------------------------------------
 
 def _log_start(fn: str, handle: str) -> None:
-    print(f"[scraper] START: {fn} → {handle}")
+    print(f"[scraper] START: {fn} -> {handle}")
 
 def _log_ok(field: str, value, handle: str) -> None:
-    print(f"[scraper] OK: {field} = {value!r} → {handle}")
+    print(f"[scraper] OK: {field} = {value!r} -> {handle}")
 
 def _log_retry(n: int, field: str, handle: str) -> None:
-    print(f"[scraper] RETRY {n}: {field} → {handle}")
+    print(f"[scraper] RETRY {n}: {field} -> {handle}")
 
 def _log_failed(field: str, handle: str, reason) -> None:
-    print(f"[scraper] FAILED: {field} → {handle} — reason: {reason}")
+    print(f"[scraper] FAILED: {field} -> {handle} — reason: {reason}")
 
 def _log_dropped(handle: str, reason: str) -> None:
     print(f"[scraper] DROPPED: {handle} — reason: {reason}")
@@ -252,35 +257,35 @@ async def _scrape_subs(page, ch_url: str, handle: str) -> int | None:
     _log_start("_scrape_subs", handle)
 
     # Step 1
-    print(f"[scraper] START: subs step 1 (yt-formatted-string#subscriber-count) → {handle}")
+    print(f"[scraper] START: subs step 1 (yt-formatted-string#subscriber-count) -> {handle}")
     try:
         el = await page.query_selector("yt-formatted-string#subscriber-count")
         if el:
             txt = (await el.inner_text()).strip()
             subs = _parse_sub_count(txt)
             if subs is not None:
-                _log_ok("subs", f"{txt} → {subs}", handle)
+                _log_ok("subs", f"{txt} -> {subs}", handle)
                 return subs
         _log_failed("subs step 1", handle, "element not found")
     except Exception as e:
         _log_failed("subs step 1", handle, e)
 
     # Step 2
-    print(f"[scraper] START: subs step 2 (#subscriber-count) → {handle}")
+    print(f"[scraper] START: subs step 2 (#subscriber-count) -> {handle}")
     try:
         el = await page.query_selector("#subscriber-count")
         if el:
             txt = (await el.inner_text()).strip()
             subs = _parse_sub_count(txt)
             if subs is not None:
-                _log_ok("subs", f"{txt} → {subs}", handle)
+                _log_ok("subs", f"{txt} -> {subs}", handle)
                 return subs
         _log_failed("subs step 2", handle, "element not found")
     except Exception as e:
         _log_failed("subs step 2", handle, e)
 
     # Step 3 — scan every span/yt-formatted-string for "subscriber"
-    print(f"[scraper] START: subs step 3 (span scan) → {handle}")
+    print(f"[scraper] START: subs step 3 (span scan) -> {handle}")
     try:
         found = False
         for sel in ["yt-formatted-string", "span"]:
@@ -291,7 +296,7 @@ async def _scrape_subs(page, ch_url: str, handle: str) -> int | None:
                     if "subscriber" in txt.lower() and len(txt) < 60:
                         subs = _parse_sub_count(txt)
                         if subs is not None:
-                            _log_ok("subs", f"{txt} → {subs}", handle)
+                            _log_ok("subs", f"{txt} -> {subs}", handle)
                             return subs
                 except Exception:
                     pass
@@ -304,7 +309,7 @@ async def _scrape_subs(page, ch_url: str, handle: str) -> int | None:
 
     # Step 4 — about page source regex
     about_url = ch_url.rstrip("/") + "/about"
-    print(f"[scraper] START: subs step 4 (about regex) → {handle}")
+    print(f"[scraper] START: subs step 4 (about regex) -> {handle}")
     try:
         await page.goto(about_url, wait_until="domcontentloaded")
         await asyncio.sleep(random.uniform(3, 5))
@@ -313,7 +318,7 @@ async def _scrape_subs(page, ch_url: str, handle: str) -> int | None:
         if m:
             subs = _parse_sub_count(m.group(1))
             if subs is not None:
-                _log_ok("subs", f"{m.group(0)} → {subs}", handle)
+                _log_ok("subs", f"{m.group(0)} -> {subs}", handle)
                 return subs
         _log_failed("subs step 4", handle, "regex found nothing")
     except Exception as e:
@@ -329,7 +334,7 @@ async def _scrape_subs(page, ch_url: str, handle: str) -> int | None:
 async def _scrape_about(page, ch_url: str, handle: str) -> tuple[dict, bool, str]:
     """
     Returns (data_dict, keep, location_badge).
-    keep=False → caller must skip this channel.
+    keep=False ->caller must skip this channel.
     """
     data: dict = {}
     about_url = ch_url.rstrip("/") + "/about"
