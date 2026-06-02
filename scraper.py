@@ -63,7 +63,7 @@ _TIME_WORDS = {
     "วัน", "เดือน", "ปี", "ชั่วโมง", "สัปดาห์", "ที่แล้ว", "ผ่านมา",
 }
 
-# Fallback selectors tried if span.inline-metadata-item is empty
+# Fallback selectors tried after the primary ytd-rich-item-renderer span
 _VIEW_FALLBACK_SELECTORS = [
     "#metadata-line span",
     "ytd-video-meta-block span",
@@ -553,10 +553,10 @@ async def _scrape_tab_views(
             await page.evaluate("window.scrollBy(0, 600)")
             await asyncio.sleep(2)
 
-            # 5. Wait for primary selector
+            # 5. Wait for video-card elements (confirms grid has rendered)
             selector_found = True
             try:
-                await page.wait_for_selector("span.inline-metadata-item", timeout=15000)
+                await page.wait_for_selector("ytd-rich-item-renderer", timeout=15000)
             except Exception as e:
                 _log_failed(f"wait_for_selector_{tab_name} attempt {attempt}", handle, e)
                 selector_found = False
@@ -565,8 +565,11 @@ async def _scrape_tab_views(
             view_values: list[int] = []
             timestamps: list[str] = []
 
+            # ytd-rich-item-renderer span is the confirmed working selector on
+            # YouTube's current DOM — it contains title, view-count and timestamp
+            # spans inside each video card.
             all_selectors = (
-                ["span.inline-metadata-item"] if selector_found else []
+                ["ytd-rich-item-renderer span"] if selector_found else []
             ) + _VIEW_FALLBACK_SELECTORS
 
             for sel in all_selectors:
