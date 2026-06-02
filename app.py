@@ -5,7 +5,7 @@ import threading
 import time
 from flask import Flask, jsonify, render_template, request, Response
 
-from scraper import scrape_channels, MAX_CHANNELS_PER_BATCH, COOLDOWN_SECONDS
+from scraper import scrape_channels, MAX_CHANNELS_PER_BATCH, COOLDOWN_SECONDS, discovery_queue
 
 app = Flask(__name__)
 
@@ -19,9 +19,9 @@ _state = {
     "message": "",
     "results": [],
     "error": None,
-    "cooldown_until": 0,   # epoch seconds
+    "cooldown_until": 0,
     "batches_done": 0,
-    "auto_batch": False,   # True while the multi-batch loop is alive
+    "auto_batch": False,
     "stop_requested": False,
 }
 _state_lock = threading.Lock()
@@ -39,13 +39,7 @@ def _progress_cb(done, total, msg):
         _state["message"] = msg
 
 
-def _run_scrape(keyword, region, min_subs, max_subs, batch_size):
-    """
-    Multi-batch loop: scrapes one batch, waits out the cooldown, then scrapes
-    the next batch using deeper search-page scrolling.  Stops when no new
-    channels are found or a stop is requested.
-    """
-    # Reset state for a fresh run
+def _run_scrape(keyword, region, min_subs, max_subs, batch_size, vpm_filter, target_category):
     with _state_lock:
         _state["running"] = False
         _state["error"] = None
@@ -68,7 +62,7 @@ def _run_scrape(keyword, region, min_subs, max_subs, batch_size):
                     break
 
             batch_num += 1
-            scroll_passes = (batch_num - 1) * 3  # go deeper each batch
+            scroll_passes = (batch_num - 1) * 3
 
             with _state_lock:
                 _state["running"] = True
@@ -85,6 +79,8 @@ def _run_scrape(keyword, region, min_subs, max_subs, batch_size):
                         _progress_cb,
                         seen_handles=seen_handles,
                         scroll_passes=scroll_passes,
+                        vpm_filter=vpm_filter,
+                        target_category=target_category,
                     )
                 )
             finally:
@@ -102,13 +98,14 @@ def _run_scrape(keyword, region, min_subs, max_subs, batch_size):
                     )
                 else:
                     _state["message"] = (
-                        f"Batch {batch_num} done — no new channels found. Stopping."
+                        f"Batch {batch_num} done — no new channels found. "
+                        + ("Checking discovery queue next…" if discovery_queue else "Stopping.")
                     )
 
-            if not results:
+            # Stop if no results and no discovered handles queued
+            if not results and not discovery_queue:
                 break
 
-            # Wait out cooldown, bailing early if stop is requested
             stop_early = False
             for _ in range(COOLDOWN_SECONDS):
                 with _state_lock:
@@ -164,10 +161,12 @@ def start():
     min_subs = max(0, int(data.get("min_subs", 1000)))
     max_subs = max(min_subs, int(data.get("max_subs", 10_000_000)))
     batch_size = min(int(data.get("batch_size", 5)), MAX_CHANNELS_PER_BATCH)
+    vpm_filter = data.get("vpm_filter", "any")
+    target_category = (data.get("target_category") or "").strip()
 
     t = threading.Thread(
         target=_run_scrape,
-        args=(keyword, region, min_subs, max_subs, batch_size),
+        args=(keyword, region, min_subs, max_subs, batch_size, vpm_filter, target_category),
         daemon=True,
     )
     t.start()
@@ -196,6 +195,7 @@ def status():
             "results_count": len(_state["results"]),
             "auto_batch": _state["auto_batch"],
             "batches_done": _state["batches_done"],
+            "discovery_queue_size": len(discovery_queue),
         })
 
 
@@ -250,7 +250,7 @@ def export_excel():
 
 def _csv_fields():
     return [
-        "name", "url", "subscribers", "location_badge", "active", "upload_freq",
+        "name", "url", "subscribers", "location_badge", "category", "upload_freq",
         "score", "country", "avg_video_views", "avg_short_views",
         "avg_live_views", "emails", "links",
     ]
@@ -267,7 +267,7 @@ def _flatten_row(r: dict) -> dict:
         "url": _fmt(r.get("url")),
         "subscribers": _fmt(r.get("subs")),
         "location_badge": _fmt(r.get("location_badge")),
-        "active": r.get("active", "Inactive"),
+        "category": _fmt(r.get("category")),
         "upload_freq": _fmt(r.get("upload_freq")),
         "score": _fmt(r.get("score")),
         "country": _fmt(r.get("country")),

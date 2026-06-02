@@ -6,7 +6,6 @@ from urllib.parse import quote_plus
 from playwright.async_api import async_playwright
 from playwright_stealth import Stealth
 
-# Force UTF-8 stdout so Thai channel names don't crash print() on Windows
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -15,8 +14,12 @@ _stealth = Stealth()
 MAX_CHANNELS_PER_BATCH = 10
 COOLDOWN_SECONDS = 600
 
+# Change 5 — module-level discovery state
+processed_handles: set = set()
+discovery_queue: list = []
+
 # ---------------------------------------------------------------------------
-# Stage 1 — name-based drop keywords (case-insensitive substring match)
+# Stage 1 — name-based drop keywords
 # ---------------------------------------------------------------------------
 _NAME_DROP_KEYWORDS = [
     "global", "north america", "south america", "latin",
@@ -53,25 +56,16 @@ _COUNTRY_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Thai digit ->Arabic digit translation table
 _THAI_DIGIT_MAP = str.maketrans("๐๑๒๓๔๕๖๗๘๙", "0123456789")
 
-# Words that indicate an upload-timestamp span
 _TIME_WORDS = {
     "ago", "hour", "hours", "day", "days", "week", "weeks",
     "month", "months", "year", "years",
     "วัน", "เดือน", "ปี", "ชั่วโมง", "สัปดาห์", "ที่แล้ว", "ผ่านมา",
 }
 
-# Fallback selectors tried after the primary ytd-rich-item-renderer span
-_VIEW_FALLBACK_SELECTORS = [
-    "#metadata-line span",
-    "ytd-video-meta-block span",
-    "#metadata span",
-]
-
 # ---------------------------------------------------------------------------
-# Logging helpers  (Fix 4)
+# Logging helpers
 # ---------------------------------------------------------------------------
 
 def _log_start(fn: str, handle: str) -> None:
@@ -110,28 +104,18 @@ def _parse_sub_count(text: str) -> int | None:
     suffix = m.group(2).upper()
     return int(value * {"K": 1_000, "M": 1_000_000, "B": 1_000_000_000}.get(suffix, 1))
 
-def _parse_view_count(text: str) -> int | None:
-    """Parse a view/watching count from span text; handles Thai digits."""
-    if not text:
+# Change 4 — view count parser
+def parse_view_count(text):
+    text = text.lower().replace(',', '').strip()
+    try:
+        if 'k' in text: return int(float(text.replace('k', '').strip()) * 1000)
+        if 'm' in text: return int(float(text.replace('m', '').strip()) * 1000000)
+        digits = ''.join(c for c in text if c.isdigit())
+        return int(digits) if digits else None
+    except:
         return None
-    text = text.translate(_THAI_DIGIT_MAP).replace(",", "").strip()
-    # number + optional K/M/B + keyword
-    m = re.search(r"([\d.]+)\s*([KMB]?)\s*(?:view|watching|ดู)", text, re.IGNORECASE)
-    if m:
-        value = float(m.group(1))
-        suffix = m.group(2).upper()
-        return int(value * {"K": 1_000, "M": 1_000_000, "B": 1_000_000_000}.get(suffix, 1))
-    # keyword before number: "ดู 1.2M"
-    if any(kw in text.lower() for kw in ("view", "watching", "ดู")):
-        m = re.search(r"([\d.]+)\s*([KMB]?)", text, re.IGNORECASE)
-        if m:
-            value = float(m.group(1))
-            suffix = m.group(2).upper()
-            return int(value * {"K": 1_000, "M": 1_000_000, "B": 1_000_000_000}.get(suffix, 1))
-    return None
 
 def _days_ago(text: str) -> float | None:
-    """Approximate days from a relative timestamp string (English or Thai)."""
     if not text:
         return None
     text_n = text.translate(_THAI_DIGIT_MAP)
@@ -156,20 +140,6 @@ def _days_ago(text: str) -> float | None:
 def _months_ago(text: str) -> float | None:
     d = _days_ago(text)
     return d / 30 if d is not None else None
-
-def _determine_active_status(timestamps: list[str]) -> str:
-    """Return 'Active' / 'Slow' / 'Inactive' from upload timestamp strings."""
-    if not timestamps:
-        return "Inactive"
-    days_list = [d for t in timestamps if (d := _days_ago(t)) is not None]
-    if not days_list:
-        return "Inactive"
-    most_recent = min(days_list)
-    if most_recent <= 60:
-        return "Active"
-    if most_recent <= 180:
-        return "Slow"
-    return "Inactive"
 
 def _calc_upload_frequency(timestamps: list[str]) -> float | None:
     if len(timestamps) < 2:
@@ -197,10 +167,6 @@ def _is_non_thai_country(country: str) -> bool:
     if re.match(r"^[a-z]{2}$", c):
         return True
     return any(len(n) > 2 and n in c for n in _NON_THAI_COUNTRIES)
-
-def _is_view_text(txt: str, view_keywords: list[str]) -> bool:
-    t = txt.lower()
-    return any(kw in t for kw in view_keywords) or bool(re.search(r"[๐-๙]", txt))
 
 def _is_timestamp_text(txt: str) -> bool:
     t = txt.lower()
@@ -256,7 +222,6 @@ def _score_channel(
 async def _scrape_subs(page, ch_url: str, handle: str) -> int | None:
     _log_start("_scrape_subs", handle)
 
-    # Step 1
     print(f"[scraper] START: subs step 1 (yt-formatted-string#subscriber-count) -> {handle}")
     try:
         el = await page.query_selector("yt-formatted-string#subscriber-count")
@@ -270,7 +235,6 @@ async def _scrape_subs(page, ch_url: str, handle: str) -> int | None:
     except Exception as e:
         _log_failed("subs step 1", handle, e)
 
-    # Step 2
     print(f"[scraper] START: subs step 2 (#subscriber-count) -> {handle}")
     try:
         el = await page.query_selector("#subscriber-count")
@@ -284,7 +248,6 @@ async def _scrape_subs(page, ch_url: str, handle: str) -> int | None:
     except Exception as e:
         _log_failed("subs step 2", handle, e)
 
-    # Step 3 — scan every span/yt-formatted-string for "subscriber"
     print(f"[scraper] START: subs step 3 (span scan) -> {handle}")
     try:
         found = False
@@ -307,7 +270,6 @@ async def _scrape_subs(page, ch_url: str, handle: str) -> int | None:
     except Exception as e:
         _log_failed("subs step 3", handle, e)
 
-    # Step 4 — about page source regex
     about_url = ch_url.rstrip("/") + "/about"
     print(f"[scraper] START: subs step 4 (about regex) -> {handle}")
     try:
@@ -328,14 +290,10 @@ async def _scrape_subs(page, ch_url: str, handle: str) -> int | None:
     return None
 
 # ---------------------------------------------------------------------------
-# About tab  (data collection + Stage 2 TH verification)
+# About tab
 # ---------------------------------------------------------------------------
 
 async def _scrape_about(page, ch_url: str, handle: str) -> tuple[dict, bool, str]:
-    """
-    Returns (data_dict, keep, location_badge).
-    keep=False ->caller must skip this channel.
-    """
     data: dict = {}
     about_url = ch_url.rstrip("/") + "/about"
     _log_start("_scrape_about", handle)
@@ -348,7 +306,6 @@ async def _scrape_about(page, ch_url: str, handle: str) -> tuple[dict, bool, str
         except Exception as e:
             _log_failed("networkidle", handle, e)
 
-        # Full body text — primary source for TH detection and country field
         body_text = ""
         try:
             body_text = await page.inner_text("body")
@@ -356,7 +313,6 @@ async def _scrape_about(page, ch_url: str, handle: str) -> tuple[dict, bool, str
         except Exception as e:
             _log_failed("body_text", handle, e)
 
-        # --- Channel name ---
         name = ""
         try:
             title = await page.title()
@@ -396,7 +352,6 @@ async def _scrape_about(page, ch_url: str, handle: str) -> tuple[dict, bool, str
             _log_failed("name", handle, "all strategies exhausted")
         data["name"] = name
 
-        # --- Subscriber count (about page backup) ---
         try:
             sub_el = page.locator("yt-formatted-string#subscriber-count")
             if await sub_el.count() > 0:
@@ -405,9 +360,7 @@ async def _scrape_about(page, ch_url: str, handle: str) -> tuple[dict, bool, str
         except Exception as e:
             _log_failed("sub_text", handle, e)
 
-        # --- Country field ---
         country = ""
-        # First try: "Location:" or "Country:" label in body text
         m = re.search(r"(?:Location|Country)\s*[:\|]\s*([^\n\r]+)", body_text, re.IGNORECASE)
         if m:
             country = m.group(1).strip()
@@ -427,7 +380,6 @@ async def _scrape_about(page, ch_url: str, handle: str) -> tuple[dict, bool, str
                 _log_failed("country (selector)", handle, e)
         data["country"] = country
 
-        # --- Stage 2: Thailand verification ---
         body_lower = body_text.lower()
         confirmed_th = (
             "thailand" in body_lower
@@ -463,7 +415,6 @@ async def _scrape_about(page, ch_url: str, handle: str) -> tuple[dict, bool, str
             data.setdefault("links", [])
             return data, False, "?"
 
-        # --- Email reveal ---
         try:
             await page.click("tp-yt-paper-button#email-reveal-button", timeout=4000)
             await asyncio.sleep(2)
@@ -488,7 +439,6 @@ async def _scrape_about(page, ch_url: str, handle: str) -> tuple[dict, bool, str
             except Exception:
                 data.setdefault("emails", [])
 
-        # --- External links ---
         try:
             link_els = await page.locator("#link-list-container a").all()
             links = []
@@ -512,176 +462,68 @@ async def _scrape_about(page, ch_url: str, handle: str) -> tuple[dict, bool, str
     return data, True, location_badge
 
 # ---------------------------------------------------------------------------
-# Shared tab-views scraper with hard waits + scroll + retry  (Fix 1)
+# Change 4 — single reusable tab views scraper
 # ---------------------------------------------------------------------------
 
-async def _scrape_tab_views(
-    page,
-    tab_url: str,
-    tab_name: str,
-    handle: str,
-    view_keywords: list[str],
-) -> tuple[list[int], list[str]]:
-    """
-    Navigates to tab_url and extracts view counts + upload timestamps.
-    Retries the full navigate→load→scroll→extract sequence up to 3 times.
-    Returns (view_values[0..7], timestamps).
-    """
-    _log_start(f"_scrape_tab_views({tab_name})", handle)
-
+async def scrape_tab_views(page, url, handle, tab_name):
     for attempt in range(1, 4):
-        if attempt > 1:
-            _log_retry(attempt - 1, f"views_{tab_name}", handle)
-            await asyncio.sleep(3)
-
         try:
-            # 1. Navigate
-            await page.goto(tab_url, wait_until="domcontentloaded")
-
-            # 2. networkidle
-            try:
-                await page.wait_for_load_state("networkidle", timeout=30000)
-            except Exception as e:
-                _log_failed(f"networkidle_{tab_name}", handle, e)
-
-            # 3. Post-nav sleep
+            print(f'[scraper] START: {tab_name} views → {handle} (attempt {attempt})')
+            await page.goto(url, wait_until='domcontentloaded', timeout=30000)
+            await page.wait_for_load_state('networkidle', timeout=30000)
             await asyncio.sleep(random.uniform(3, 5))
-
-            # 4. Scroll twice
-            await page.evaluate("window.scrollBy(0, 600)")
+            await page.evaluate('window.scrollBy(0, 700)')
             await asyncio.sleep(2)
-            await page.evaluate("window.scrollBy(0, 600)")
+            await page.evaluate('window.scrollBy(0, 700)')
             await asyncio.sleep(2)
-
-            # 5. Wait for video-card elements (confirms grid has rendered)
-            selector_found = True
-            try:
-                await page.wait_for_selector("ytd-rich-item-renderer", timeout=15000)
-            except Exception as e:
-                _log_failed(f"wait_for_selector_{tab_name} attempt {attempt}", handle, e)
-                selector_found = False
-
-            # 6. Extract from primary + fallback selectors
-            view_values: list[int] = []
-            timestamps: list[str] = []
-
-            # ytd-rich-item-renderer span is the confirmed working selector on
-            # YouTube's current DOM — it contains title, view-count and timestamp
-            # spans inside each video card.
-            all_selectors = (
-                ["ytd-rich-item-renderer span"] if selector_found else []
-            ) + _VIEW_FALLBACK_SELECTORS
-
-            for sel in all_selectors:
-                if view_values:
+            selectors = ['span.inline-metadata-item', '#metadata-line span', 'ytd-video-meta-block span', '#metadata span']
+            items = []
+            for sel in selectors:
+                elements = await page.query_selector_all(sel)
+                for el in elements:
+                    text = (await el.inner_text()).strip()
+                    if any(w in text.lower() for w in ['view', 'วิว', 'ครั้ง', 'watch']):
+                        items.append(text)
+                if items:
                     break
-                try:
-                    els = await page.locator(sel).all()
-                    for el in els:
-                        try:
-                            txt = (await el.inner_text()).strip()
-                            if _is_view_text(txt, view_keywords):
-                                v = _parse_view_count(txt)
-                                if v is not None:
-                                    view_values.append(v)
-                            elif _is_timestamp_text(txt):
-                                timestamps.append(txt)
-                            if len(view_values) >= 8:
-                                break
-                        except Exception:
-                            pass
-                except Exception as e:
-                    _log_failed(f"selector({sel})_{tab_name}", handle, e)
-
-            # 7. Return if we got something
-            if view_values:
-                sample = view_values[:8]
-                avg = int(sum(sample) / len(sample))
-                _log_ok(f"views_{tab_name}", f"sample={sample} avg={avg}", handle)
-                return sample, timestamps
-
-            _log_failed(
-                f"views_{tab_name}",
-                handle,
-                f"attempt {attempt}: all selectors returned empty",
-            )
-
+            if not items:
+                print(f'[scraper] RETRY {attempt}: {tab_name} views empty → {handle}')
+                await asyncio.sleep(3)
+                continue
+            numbers = []
+            for t in items[:8]:
+                n = parse_view_count(t)
+                if n:
+                    numbers.append(n)
+            avg = int(sum(numbers) / len(numbers)) if numbers else None
+            print(f'[scraper] OK: {tab_name}_avg_views = {avg} → {handle}')
+            return avg
         except Exception as e:
-            _log_failed(f"views_{tab_name}", handle, f"attempt {attempt} outer: {e}")
-
-    # All 3 attempts exhausted
-    print(
-        f"[scraper] FAILED views on {tab_name} for {handle}"
-        f" — selector not found after 3 attempts"
-    )
-    return [], []
+            print(f'[scraper] FAILED: {tab_name} views → {handle} — reason: {e}')
+            await asyncio.sleep(3)
+    return None
 
 # ---------------------------------------------------------------------------
-# Per-tab wrappers
+# Change 5 — channels tab discovery
 # ---------------------------------------------------------------------------
 
-async def _scrape_videos_tab(page, ch_url: str, handle: str) -> dict:
-    _log_start("_scrape_videos_tab", handle)
-    data: dict = {"avg_video_views": None, "upload_freq": None, "active": "Inactive"}
-
-    view_values, timestamps = await _scrape_tab_views(
-        page,
-        ch_url.rstrip("/") + "/videos",
-        "videos",
-        handle,
-        ["view", "ดู"],
-    )
-
-    if view_values:
-        data["avg_video_views"] = int(sum(view_values) / len(view_values))
-        _log_ok("avg_video_views", data["avg_video_views"], handle)
-
-    data["active"] = _determine_active_status(timestamps)
-    _log_ok("active", data["active"], handle)
-
-    if len(timestamps) >= 2:
-        data["upload_freq"] = _calc_upload_frequency(timestamps)
-        _log_ok("upload_freq", data["upload_freq"], handle)
-
-    return data
-
-
-async def _scrape_shorts_tab(page, ch_url: str, handle: str) -> dict:
-    _log_start("_scrape_shorts_tab", handle)
-    data: dict = {"avg_short_views": None}
-
-    view_values, _ = await _scrape_tab_views(
-        page,
-        ch_url.rstrip("/") + "/shorts",
-        "shorts",
-        handle,
-        ["view", "ดู"],
-    )
-
-    if view_values:
-        data["avg_short_views"] = int(sum(view_values) / len(view_values))
-        _log_ok("avg_short_views", data["avg_short_views"], handle)
-
-    return data
-
-
-async def _scrape_live_tab(page, ch_url: str, handle: str) -> dict:
-    _log_start("_scrape_live_tab", handle)
-    data: dict = {"avg_live_views": None}
-
-    view_values, _ = await _scrape_tab_views(
-        page,
-        ch_url.rstrip("/") + "/streams",
-        "live",
-        handle,
-        ["view", "watching", "ดู", "กำลังดู"],
-    )
-
-    if view_values:
-        data["avg_live_views"] = int(sum(view_values) / len(view_values))
-        _log_ok("avg_live_views", data["avg_live_views"], handle)
-
-    return data
+async def discover_from_channels_tab(page, handle):
+    url = f'https://www.youtube.com/@{handle}/channels'
+    print(f'[scraper] START: channels tab discovery → {handle}')
+    await page.goto(url, wait_until='domcontentloaded', timeout=20000)
+    await page.wait_for_load_state('networkidle', timeout=20000)
+    await asyncio.sleep(random.uniform(2, 4))
+    links = await page.query_selector_all('a#channel-name, a.channel-link, ytd-channel-renderer a')
+    new_handles = []
+    for link in links:
+        href = await link.get_attribute('href')
+        if href and '/@' in href:
+            h = href.split('/@')[-1].split('/')[0].strip()
+            if h and h not in processed_handles and h not in discovery_queue:
+                new_handles.append(h)
+                discovery_queue.append(h)
+    print(f'[scraper] DISCOVERED: {len(new_handles)} new channels from {handle} channels tab')
+    return new_handles
 
 # ---------------------------------------------------------------------------
 # Core scraper
@@ -696,6 +538,8 @@ async def scrape_channels(
     progress_callback=None,
     seen_handles: set | None = None,
     scroll_passes: int = 0,
+    vpm_filter: str = 'any',
+    target_category: str = '',
 ) -> list[dict]:
     if seen_handles is None:
         seen_handles = set()
@@ -723,7 +567,7 @@ async def scrape_channels(
         page = await context.new_page()
         await _stealth.apply_stealth_async(page)
 
-        # ── Search ──────────────────────────────────────────────────────────
+        # Search
         search_url = (
             f"https://www.youtube.com/results?search_query={quote_plus(keyword)}"
             f"&sp=EgIQAg%253D%253D&gl={region}"
@@ -746,7 +590,7 @@ async def scrape_channels(
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             await asyncio.sleep(_rand_delay(2, 4))
 
-        # ── Collect channel links ────────────────────────────────────────────
+        # Collect channel links from search
         channel_links: list[str] = []
         attempts = 0
         while len(channel_links) < batch_size and attempts < 8:
@@ -769,27 +613,35 @@ async def scrape_channels(
         channel_links = channel_links[:batch_size]
         for link in channel_links:
             seen_handles.add(link)
-        print(f"[scraper] Collected {len(channel_links)} channel links")
 
-        # ── Per-channel loop ─────────────────────────────────────────────────
+        # Add discovery queue items from prior batches (Change 5)
+        disc_added = []
+        while discovery_queue and (len(channel_links) + len(disc_added)) < batch_size * 2:
+            h = discovery_queue.pop(0)
+            if h not in processed_handles:
+                disc_path = f'/@{h}'
+                if disc_path not in channel_links and disc_path not in disc_added:
+                    disc_added.append(disc_path)
+        channel_links = channel_links + disc_added
+        print(f"[scraper] Collected {len(channel_links)} channel links ({len(disc_added)} from discovery queue)")
+
+        # Per-channel loop
         for idx, ch_path in enumerate(channel_links):
-            handle = ch_path.lstrip("/")   # e.g. "@Amazing_Thailand"
+            handle = ch_path.lstrip("/")        # @Amazing_Thailand
+            handle_bare = handle.lstrip("@")    # Amazing_Thailand
             ch_url = f"https://www.youtube.com{ch_path}"
 
             if progress_callback:
                 progress_callback(idx, len(channel_links), f"Checking {handle}")
 
-            # Stage 1a — handle keyword check (instant, no network)
             if _name_should_drop("", handle):
                 _log_dropped(handle, "handle matches Stage-1 keyword")
                 await asyncio.sleep(_rand_delay(1, 3))
                 continue
 
-            # Navigate to main channel page
             await page.goto(ch_url, wait_until="domcontentloaded")
             await asyncio.sleep(random.uniform(3, 5))
 
-            # Stage 1b — name check from page title (before about page)
             try:
                 early_title = await page.title()
                 if early_title and " - YouTube" in early_title:
@@ -801,7 +653,6 @@ async def scrape_channels(
             except Exception:
                 pass
 
-            # Subscriber count (4-step)
             subs = await _scrape_subs(page, ch_url, handle)
             sub_pending = subs is None
 
@@ -811,21 +662,18 @@ async def scrape_channels(
                     await asyncio.sleep(_rand_delay(2, 5))
                     continue
 
-            # About tab — Stage 2 TH verification + data collection
             channel_data, keep, location_badge = await _scrape_about(page, ch_url, handle)
 
             if not keep:
                 await asyncio.sleep(_rand_delay(2, 5))
                 continue
 
-            # Stage 1c — full name check after about scrape
             full_name = channel_data.get("name", "")
             if _name_should_drop(full_name, handle):
                 _log_dropped(handle, f"name '{full_name}' matches Stage-1 keyword (post-about)")
                 await asyncio.sleep(_rand_delay(2, 5))
                 continue
 
-            # Resolve subscriber count
             if not sub_pending:
                 channel_data["subs"] = subs
             else:
@@ -836,23 +684,84 @@ async def scrape_channels(
 
             await asyncio.sleep(_rand_delay(5, 10))
 
-            # Videos tab
-            video_data = await _scrape_videos_tab(page, ch_url, handle)
-            channel_data.update(video_data)
+            # Videos tab (Change 4)
+            videos_url = ch_url.rstrip("/") + "/videos"
+            avg_video_views = await scrape_tab_views(page, videos_url, handle, "videos")
+            channel_data["avg_video_views"] = avg_video_views
+
+            # Category extraction (Change 3) — from videos tab page after load
+            category = None
+            try:
+                el = await page.query_selector('meta[itemprop="genre"]')
+                if el:
+                    category = await el.get_attribute('content')
+            except Exception:
+                pass
+            if not category:
+                try:
+                    category = await page.evaluate(
+                        '() => { try { return ytInitialPlayerResponse.microformat.playerMicroformatRenderer.category } catch(e) { return null } }'
+                    )
+                except Exception:
+                    pass
+            channel_data["category"] = category or ""
+            if category:
+                _log_ok("category", category, handle)
+
+            # Category filter (Change 3)
+            if target_category:
+                found = category or ""
+                if target_category.lower() not in found.lower():
+                    print(f"[scraper] SKIPPED: {handle} — category '{found}' does not match target '{target_category}'")
+                    await asyncio.sleep(_rand_delay(2, 5))
+                    continue
+
+            # Timestamps for upload_freq — from already-loaded videos page
+            timestamps = []
+            try:
+                els = await page.query_selector_all('ytd-rich-item-renderer span')
+                for el in els:
+                    try:
+                        txt = (await el.inner_text()).strip()
+                        if _is_timestamp_text(txt):
+                            timestamps.append(txt)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            if len(timestamps) >= 2:
+                channel_data["upload_freq"] = _calc_upload_frequency(timestamps)
+                _log_ok("upload_freq", channel_data["upload_freq"], handle)
+            else:
+                channel_data["upload_freq"] = None
+
+            # VPM filter (Change 2)
+            videos_per_month = channel_data.get("upload_freq") or 0
+            _vpm_ranges = {
+                '0-10': (0, 10), '11-20': (11, 20), '21-30': (21, 30),
+                '31-40': (31, 40), '50plus': (50, 99999),
+            }
+            if vpm_filter != 'any':
+                lo, hi = _vpm_ranges[vpm_filter]
+                if not (lo <= videos_per_month <= hi):
+                    print(f'[scraper] SKIPPED: {handle} — videos/month {videos_per_month} outside {vpm_filter}')
+                    await asyncio.sleep(_rand_delay(2, 5))
+                    continue
 
             await asyncio.sleep(_rand_delay(5, 10))
 
-            # Shorts tab
-            shorts_data = await _scrape_shorts_tab(page, ch_url, handle)
-            channel_data.update(shorts_data)
+            # Shorts tab (Change 4)
+            shorts_url = ch_url.rstrip("/") + "/shorts"
+            avg_short_views = await scrape_tab_views(page, shorts_url, handle, "shorts")
+            channel_data["avg_short_views"] = avg_short_views
 
             await asyncio.sleep(_rand_delay(5, 10))
 
-            # Live tab
-            live_data = await _scrape_live_tab(page, ch_url, handle)
-            channel_data.update(live_data)
+            # Live tab (Change 4)
+            live_url = ch_url.rstrip("/") + "/streams"
+            avg_live_views = await scrape_tab_views(page, live_url, handle, "live")
+            channel_data["avg_live_views"] = avg_live_views
 
-            # Score
             channel_data["score"] = _score_channel(
                 channel_data.get("subs"),
                 channel_data.get("avg_video_views"),
@@ -863,6 +772,7 @@ async def scrape_channels(
             channel_data["url"] = ch_url
             results.append(channel_data)
 
+            processed_handles.add(handle_bare)
             _log_ok("channel_complete", channel_data.get("name", handle), handle)
             if progress_callback:
                 progress_callback(
@@ -870,6 +780,14 @@ async def scrape_channels(
                     len(channel_links),
                     f"Done {channel_data.get('name', handle)}",
                 )
+
+            # Channel discovery (Change 5) — only when category filter matches
+            if target_category and channel_data.get("category"):
+                if target_category.lower() in channel_data["category"].lower():
+                    try:
+                        await discover_from_channels_tab(page, handle_bare)
+                    except Exception as e:
+                        _log_failed("channels_tab_discovery", handle, e)
 
             if idx < len(channel_links) - 1:
                 await asyncio.sleep(_rand_delay(10, 20))
