@@ -3,5 +3,6 @@ __pycache__/
 *.pyo
 *.png
 thread.log
+flask_out.txt
 debug_search.png
 ss_*.png
