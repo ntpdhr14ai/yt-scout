@@ -204,7 +204,7 @@ def _score_channel(
         elif ratio >= 0.05: score += 8
         else:               score += 3
 
-    if upload_freq:
+    if isinstance(upload_freq, (int, float)) and upload_freq:
         if upload_freq >= 8:    score += 15
         elif upload_freq >= 4:  score += 11
         elif upload_freq >= 2:  score += 7
@@ -401,14 +401,12 @@ async def _scrape_about(page, ch_url: str, handle: str) -> tuple[dict, bool, str
             _log_dropped(handle, f"declared non-Thai country: {country}")
             keep = False
             location_badge = "?"
-        elif not body_text.strip():
-            _log_dropped(handle, "about page empty — no Thai evidence")
-            keep = False
-            location_badge = "?"
         else:
-            _log_dropped(handle, "no Thai evidence in about page")
-            keep = False
+            # Rule E: empty page or no TH evidence is not a confirmed non-Thai — keep with ?
             location_badge = "?"
+            keep = True
+            reason = "about page empty" if not body_text.strip() else "no TH evidence but not confirmed non-Thai"
+            _log_ok("location", f"? ({reason})", handle)
 
         if not keep:
             data.setdefault("emails", [])
@@ -453,11 +451,12 @@ async def _scrape_about(page, ch_url: str, handle: str) -> tuple[dict, bool, str
             _log_failed("links", handle, e)
 
     except Exception as e:
+        # Rule E: loading failure is not a drop reason — keep with ? badge
         _log_failed("_scrape_about", handle, e)
         data.setdefault("name", "")
         data.setdefault("links", [])
         data.setdefault("emails", [])
-        return data, False, "?"
+        return data, True, "?"
 
     return data, True, location_badge
 
@@ -502,6 +501,19 @@ async def scrape_tab_views(page, url, handle, tab_name):
             print(f'[scraper] FAILED: {tab_name} views → {handle} — reason: {e}')
             await asyncio.sleep(3)
     return None
+
+# Rule D — 90-second hard timeout wrapper for tab scraping
+async def _scrape_tab_with_timeout(page, url, handle, tab_name):
+    try:
+        return await asyncio.wait_for(
+            scrape_tab_views(page, url, handle, tab_name), timeout=90
+        )
+    except asyncio.TimeoutError:
+        print(f'[scraper] TIMEOUT: {tab_name} → {handle} — exceeded 90s limit')
+        return None
+    except Exception as e:
+        print(f'[scraper] FAILED: {tab_name} views → {handle} — reason: {e}')
+        return None
 
 # ---------------------------------------------------------------------------
 # Change 5 — channels tab discovery
@@ -684,9 +696,9 @@ async def scrape_channels(
 
             await asyncio.sleep(_rand_delay(5, 10))
 
-            # Videos tab (Change 4)
+            # Videos tab (Rule C/D — timeout-wrapped, never raises)
             videos_url = ch_url.rstrip("/") + "/videos"
-            avg_video_views = await scrape_tab_views(page, videos_url, handle, "videos")
+            avg_video_views = await _scrape_tab_with_timeout(page, videos_url, handle, "videos")
             channel_data["avg_video_views"] = avg_video_views
 
             # Category extraction (Change 3) — from videos tab page after load
@@ -708,11 +720,13 @@ async def scrape_channels(
             if category:
                 _log_ok("category", category, handle)
 
-            # Category filter (Change 3)
+            # Category filter (Rule A) — only skip if category extracted AND doesn't match
             if target_category:
-                found = category or ""
-                if target_category.lower() not in found.lower():
-                    print(f"[scraper] SKIPPED: {handle} — category '{found}' does not match target '{target_category}'")
+                if not category:
+                    channel_data["category"] = "Pending Check"
+                    print(f"[scraper] PENDING: category unextractable → {handle}, continuing")
+                elif target_category.lower() not in category.lower():
+                    print(f"[scraper] SKIPPED: {handle} — category '{category}' does not match target '{target_category}'")
                     await asyncio.sleep(_rand_delay(2, 5))
                     continue
 
@@ -735,31 +749,34 @@ async def scrape_channels(
             else:
                 channel_data["upload_freq"] = None
 
-            # VPM filter (Change 2)
-            videos_per_month = channel_data.get("upload_freq") or 0
+            # VPM filter (Rule B) — only skip if upload_freq is a real extracted number
             _vpm_ranges = {
                 '0-10': (0, 10), '11-20': (11, 20), '21-30': (21, 30),
                 '31-40': (31, 40), '50plus': (50, 99999),
             }
-            if vpm_filter != 'any':
+            upload_freq_val = channel_data.get("upload_freq")
+            if upload_freq_val is None:
+                channel_data["upload_freq"] = "Pending Check"
+                print(f'[scraper] PENDING: videos/month unextractable → {handle}, continuing')
+            elif vpm_filter != 'any' and isinstance(upload_freq_val, (int, float)):
                 lo, hi = _vpm_ranges[vpm_filter]
-                if not (lo <= videos_per_month <= hi):
-                    print(f'[scraper] SKIPPED: {handle} — videos/month {videos_per_month} outside {vpm_filter}')
+                if not (lo <= upload_freq_val <= hi):
+                    print(f'[scraper] SKIPPED: {handle} — videos/month {upload_freq_val} outside {vpm_filter}')
                     await asyncio.sleep(_rand_delay(2, 5))
                     continue
 
             await asyncio.sleep(_rand_delay(5, 10))
 
-            # Shorts tab (Change 4)
+            # Shorts tab (Rule C/D)
             shorts_url = ch_url.rstrip("/") + "/shorts"
-            avg_short_views = await scrape_tab_views(page, shorts_url, handle, "shorts")
+            avg_short_views = await _scrape_tab_with_timeout(page, shorts_url, handle, "shorts")
             channel_data["avg_short_views"] = avg_short_views
 
             await asyncio.sleep(_rand_delay(5, 10))
 
-            # Live tab (Change 4)
+            # Live tab (Rule C/D)
             live_url = ch_url.rstrip("/") + "/streams"
-            avg_live_views = await scrape_tab_views(page, live_url, handle, "live")
+            avg_live_views = await _scrape_tab_with_timeout(page, live_url, handle, "live")
             channel_data["avg_live_views"] = avg_live_views
 
             channel_data["score"] = _score_channel(
