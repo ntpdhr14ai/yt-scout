@@ -108,11 +108,13 @@ def _parse_sub_count(text: str) -> int | None:
 def parse_view_count(text):
     text = text.lower().replace(',', '').strip()
     try:
-        if 'k' in text: return int(float(text.replace('k', '').strip()) * 1000)
-        if 'm' in text: return int(float(text.replace('m', '').strip()) * 1000000)
+        if 'k' in text:
+            return int(float(text.replace('k', '').strip()) * 1000)
+        if 'm' in text:
+            return int(float(text.replace('m', '').strip()) * 1000000)
         digits = ''.join(c for c in text if c.isdigit())
         return int(digits) if digits else None
-    except:
+    except Exception:
         return None
 
 def _days_ago(text: str) -> float | None:
@@ -183,32 +185,50 @@ def _score_channel(
     subs_int = subs if isinstance(subs, int) else None
 
     if subs_int:
-        if subs_int >= 1_000_000:   score += 25
-        elif subs_int >= 100_000:   score += 20
-        elif subs_int >= 10_000:    score += 15
-        elif subs_int >= 1_000:     score += 8
-        else:                       score += 3
+        if subs_int >= 1_000_000:
+            score += 25
+        elif subs_int >= 100_000:
+            score += 20
+        elif subs_int >= 10_000:
+            score += 15
+        elif subs_int >= 1_000:
+            score += 8
+        else:
+            score += 3
 
     if subs_int and avg_video_views:
         ratio = avg_video_views / max(subs_int, 1)
-        if ratio >= 0.3:    score += 30
-        elif ratio >= 0.1:  score += 22
-        elif ratio >= 0.05: score += 15
-        elif ratio >= 0.01: score += 8
-        else:               score += 3
+        if ratio >= 0.3:
+            score += 30
+        elif ratio >= 0.1:
+            score += 22
+        elif ratio >= 0.05:
+            score += 15
+        elif ratio >= 0.01:
+            score += 8
+        else:
+            score += 3
 
     if subs_int and avg_short_views:
         ratio = avg_short_views / max(subs_int, 1)
-        if ratio >= 0.5:    score += 20
-        elif ratio >= 0.2:  score += 14
-        elif ratio >= 0.05: score += 8
-        else:               score += 3
+        if ratio >= 0.5:
+            score += 20
+        elif ratio >= 0.2:
+            score += 14
+        elif ratio >= 0.05:
+            score += 8
+        else:
+            score += 3
 
     if isinstance(upload_freq, (int, float)) and upload_freq:
-        if upload_freq >= 8:    score += 15
-        elif upload_freq >= 4:  score += 11
-        elif upload_freq >= 2:  score += 7
-        elif upload_freq >= 0.5: score += 3
+        if upload_freq >= 8:
+            score += 15
+        elif upload_freq >= 4:
+            score += 11
+        elif upload_freq >= 2:
+            score += 7
+        elif upload_freq >= 0.5:
+            score += 3
 
     if location_badge in ("TH", "TH inferred"):
         score += 10
