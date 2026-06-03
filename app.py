@@ -1,6 +1,7 @@
 import asyncio
 import csv
 import io
+import openpyxl
 import threading
 import time
 from flask import Flask, jsonify, render_template, request, Response
@@ -25,11 +26,17 @@ _state = {
     "stop_requested": False,
 }
 _state_lock = threading.Lock()
+_stop_event = threading.Event()
+
+_CSV_FIELDS = [
+    "name", "url", "subscribers", "location_badge", "category", "upload_freq",
+    "score", "country", "avg_video_views", "avg_short_views",
+    "avg_live_views", "emails", "links",
+]
 
 
-def _update(key, value):
-    with _state_lock:
-        _state[key] = value
+def _fmt(v):
+    return "—" if v is None else v
 
 
 def _progress_cb(done, total, msg):
@@ -40,8 +47,8 @@ def _progress_cb(done, total, msg):
 
 
 def _run_scrape(keyword, region, min_subs, max_subs, batch_size, vpm_filter, target_category):
+    _stop_event.clear()
     with _state_lock:
-        _state["running"] = False
         _state["error"] = None
         _state["results"] = []
         _state["progress"] = 0
@@ -57,9 +64,8 @@ def _run_scrape(keyword, region, min_subs, max_subs, batch_size, vpm_filter, tar
 
     try:
         while True:
-            with _state_lock:
-                if _state["stop_requested"]:
-                    break
+            if _stop_event.is_set():
+                break
 
             batch_num += 1
             scroll_passes = (batch_num - 1) * 3
@@ -70,21 +76,16 @@ def _run_scrape(keyword, region, min_subs, max_subs, batch_size, vpm_filter, tar
                 _state["total"] = batch_size
                 _state["message"] = f"Batch {batch_num} — scanning channels…"
 
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                results = loop.run_until_complete(
-                    scrape_channels(
-                        keyword, region, min_subs, max_subs, batch_size,
-                        _progress_cb,
-                        seen_handles=seen_handles,
-                        scroll_passes=scroll_passes,
-                        vpm_filter=vpm_filter,
-                        target_category=target_category,
-                    )
+            results = asyncio.run(
+                scrape_channels(
+                    keyword, region, min_subs, max_subs, batch_size,
+                    _progress_cb,
+                    seen_handles=seen_handles,
+                    scroll_passes=scroll_passes,
+                    vpm_filter=vpm_filter,
+                    target_category=target_category,
                 )
-            finally:
-                loop.close()
+            )
 
             with _state_lock:
                 _state["results"].extend(results)
@@ -106,15 +107,7 @@ def _run_scrape(keyword, region, min_subs, max_subs, batch_size, vpm_filter, tar
             if not results and not discovery_queue:
                 break
 
-            stop_early = False
-            for _ in range(COOLDOWN_SECONDS):
-                with _state_lock:
-                    if _state["stop_requested"]:
-                        stop_early = True
-                        break
-                time.sleep(1)
-
-            if stop_early:
+            if _stop_event.wait(timeout=COOLDOWN_SECONDS):
                 break
 
     except Exception as exc:
@@ -175,6 +168,7 @@ def start():
 
 @app.route("/stop", methods=["POST"])
 def stop():
+    _stop_event.set()
     with _state_lock:
         _state["stop_requested"] = True
         _state["message"] = "Stop requested — finishing current channel…"
@@ -211,7 +205,7 @@ def export_csv():
         rows = list(_state["results"])
 
     output = io.StringIO()
-    writer = csv.DictWriter(output, fieldnames=_csv_fields(), extrasaction="ignore")
+    writer = csv.DictWriter(output, fieldnames=_CSV_FIELDS, extrasaction="ignore")
     writer.writeheader()
     for row in rows:
         writer.writerow(_flatten_row(row))
@@ -225,43 +219,28 @@ def export_csv():
 
 @app.route("/export/excel")
 def export_excel():
-    import openpyxl
     with _state_lock:
         rows = list(_state["results"])
 
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "YT Scout"
-    fields = _csv_fields()
-    ws.append(fields)
+    ws.append(_CSV_FIELDS)
     for row in rows:
         flat = _flatten_row(row)
-        ws.append([flat.get(f, "") for f in fields])
+        ws.append([flat.get(f, "") for f in _CSV_FIELDS])
 
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
     return Response(
-        buf.read(),
+        buf,
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": "attachment; filename=yt_scout_results.xlsx"},
     )
 
 
-def _csv_fields():
-    return [
-        "name", "url", "subscribers", "location_badge", "category", "upload_freq",
-        "score", "country", "avg_video_views", "avg_short_views",
-        "avg_live_views", "emails", "links",
-    ]
-
-
 def _flatten_row(r: dict) -> dict:
-    def _fmt(v):
-        if v is None:
-            return "—"
-        return v
-
     return {
         "name": _fmt(r.get("name")),
         "url": _fmt(r.get("url")),
