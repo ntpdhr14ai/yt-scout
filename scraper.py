@@ -560,22 +560,50 @@ async def _scrape_tab_with_timeout(page, url, handle, tab_name):
 # ---------------------------------------------------------------------------
 
 async def discover_from_channels_tab(page, handle):
-    url = f'https://www.youtube.com/@{handle}/channels'
-    print(f'[scraper] START: channels tab discovery → {handle}')
-    await page.goto(url, wait_until='domcontentloaded', timeout=20000)
-    await page.wait_for_load_state('networkidle', timeout=20000)
-    await asyncio.sleep(random.uniform(2, 4))
-    links = await page.query_selector_all('a#channel-name, a.channel-link, ytd-channel-renderer a')
-    new_handles = []
-    for link in links:
-        href = await link.get_attribute('href')
-        if href and '/@' in href:
-            h = href.split('/@')[-1].split('/')[0].strip()
-            if h and h not in processed_handles and h not in discovery_queue:
-                new_handles.append(h)
-                discovery_queue.append(h)
-    print(f'[scraper] DISCOVERED: {len(new_handles)} new channels from {handle} channels tab')
-    return new_handles
+    try:
+        url = f'https://www.youtube.com/@{handle}/channels'
+        print(f'[scraper] SEED: visiting {url}')
+        await page.goto(url, wait_until='domcontentloaded', timeout=30000)
+        await page.wait_for_load_state('networkidle', timeout=20000)
+        await asyncio.sleep(random.uniform(2, 4))
+
+        body_text = await page.inner_text('body')
+        if any(phrase in body_text.lower() for phrase in [
+            'this channel has no', 'no channels', 'ไม่มีช่อง'
+        ]):
+            print(f'[scraper] SEED EMPTY: @{handle} has no public channels tab')
+            return []
+
+        selectors = ['a#channel-name', 'a.channel-link', 'ytd-channel-renderer a', '#channel-info a']
+        links = []
+        for sel in selectors:
+            links = await page.query_selector_all(sel)
+            if links:
+                break
+
+        if not links:
+            print(f'[scraper] SEED EMPTY: no channel links found on @{handle}/channels')
+            return []
+
+        new_handles = []
+        for link in links:
+            try:
+                href = await link.get_attribute('href')
+                if href and '/@' in href:
+                    h = href.split('/@')[-1].split('/')[0].strip()
+                    if h and h not in processed_handles and h not in discovery_queue:
+                        new_handles.append(h)
+                        discovery_queue.append(h)
+            except Exception as e:
+                print(f'[scraper] SEED LINK ERROR: {e}')
+                continue
+
+        print(f'[scraper] SEED: found {len(new_handles)} new handles from @{handle}')
+        return new_handles
+
+    except Exception as e:
+        print(f'[scraper] SEED FAILED: @{handle} — {e}')
+        return []
 
 # ---------------------------------------------------------------------------
 # Core scraper

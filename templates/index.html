@@ -290,6 +290,21 @@
       vertical-align: middle;
       margin-right: 6px;
     }
+
+    #errorBanner {
+      background: #2c0a0a;
+      border: 1px solid #7c1010;
+      border-radius: var(--radius);
+      padding: 14px 18px;
+      margin-bottom: 16px;
+      display: none;
+      align-items: center;
+      gap: 12px;
+    }
+    #errorBanner.visible { display: flex; }
+    #errorBanner .err-icon { font-size: 1.4rem; flex-shrink: 0; }
+    #errorBanner .err-msg { flex: 1; font-weight: 600; color: #f87171; font-size: 0.9rem; }
+    #errorBanner .err-dismiss { background: none; border: 1px solid #7c1010; color: #f87171; padding: 4px 10px; font-size: 0.8rem; border-radius: 4px; cursor: pointer; }
   </style>
 </head>
 <body>
@@ -312,6 +327,13 @@
     <div class="cd-title" id="cdTitle">Cooldown active — next batch starts automatically</div>
     <div class="cd-timer" id="cooldownTimer">10:00</div>
   </div>
+</div>
+
+<!-- Error banner -->
+<div id="errorBanner">
+  <div class="err-icon">⚠️</div>
+  <div class="err-msg" id="errorBannerMsg"></div>
+  <button class="err-dismiss" onclick="document.getElementById('errorBanner').classList.remove('visible')">Dismiss</button>
 </div>
 
 <!-- Search form -->
@@ -571,6 +593,20 @@
     if (cooldownInterval) { clearInterval(cooldownInterval); cooldownInterval = null; }
   }
 
+  function showErrorBanner(msg) {
+    document.getElementById('errorBannerMsg').textContent = msg;
+    document.getElementById('errorBanner').classList.add('visible');
+  }
+
+  function resetUIToReady() {
+    elStartBtn.disabled = false;
+    elStartBtn.innerHTML = 'Search Channels';
+    elStopBtn.style.display = 'none';
+    elProgressSection.style.display = 'none';
+    hideCooldown();
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  }
+
   // -------------------------------------------------------------------------
   // Poll loop
   // -------------------------------------------------------------------------
@@ -607,6 +643,13 @@
         elStartBtn.innerHTML = 'Search Channels';
         if (data.error) {
           elStatusMsg.textContent = 'Error: ' + data.error;
+        }
+        if (data.current_status && (
+          data.current_status.startsWith('Scraper crashed') ||
+          data.current_status.includes('no discoverable')
+        )) {
+          showErrorBanner(data.current_status);
+          resetUIToReady();
         }
       }
 
@@ -671,6 +714,7 @@
     elProgressSection.style.display = 'block';
     elStatusMsg.textContent = '';
     hideCooldown();
+    document.getElementById('errorBanner').classList.remove('visible');
 
     try {
       const resp = await fetch('/start', {

@@ -4,6 +4,7 @@ import io
 import openpyxl
 import threading
 import time
+import traceback
 from flask import Flask, jsonify, render_template, request, Response
 
 import scraper
@@ -63,6 +64,8 @@ def _run_scrape(keyword, region, min_subs, max_subs, batch_size, target_category
 
     seen_handles: set = set()
     batch_num = 0
+    seed_exhausted = False
+    _preserve_message = False
 
     try:
         while True:
@@ -72,6 +75,10 @@ def _run_scrape(keyword, region, min_subs, max_subs, batch_size, target_category
             batch_num += 1
             scroll_passes = (batch_num - 1) * 3
 
+            in_seed_mode = bool(seed_channel) and not seed_exhausted
+            effective_seed = seed_channel if in_seed_mode else ''
+            effective_keyword = '' if in_seed_mode else keyword
+
             with _state_lock:
                 _state["running"] = True
                 _state["progress"] = 0
@@ -80,13 +87,13 @@ def _run_scrape(keyword, region, min_subs, max_subs, batch_size, target_category
 
             results = asyncio.run(
                 scrape_channels(
-                    keyword, region, min_subs, max_subs, batch_size,
+                    effective_keyword, region, min_subs, max_subs, batch_size,
                     _progress_cb,
                     seen_handles=seen_handles,
                     scroll_passes=scroll_passes,
                     target_category=target_category,
                     activity_filter=activity_filter,
-                    seed_channel=seed_channel,
+                    seed_channel=effective_seed,
                 )
             )
 
@@ -106,9 +113,26 @@ def _run_scrape(keyword, region, min_subs, max_subs, batch_size, target_category
                         + ("Checking discovery queue next…" if discovery_queue else "Stopping.")
                     )
 
-            # Stop if no results and no discovered handles queued
+            # Fix 2 & 3: graceful handling of empty queue
             if not results and not discovery_queue:
-                break
+                if in_seed_mode and keyword:
+                    # Fix 3: fall back from seed to keyword search
+                    seed_exhausted = True
+                    with _state_lock:
+                        _state["message"] = f'Seed discovery complete — switching to keyword search for "{keyword}"'
+                    print(f'[scraper] QUEUE EMPTY: falling back to keyword search for "{keyword}"')
+                    if _stop_event.wait(timeout=COOLDOWN_SECONDS):
+                        break
+                    continue
+                elif in_seed_mode and batch_num == 1:
+                    # Fix 2: seed had no discoverable peers at all
+                    _preserve_message = True
+                    with _state_lock:
+                        _state["message"] = f'Seed channel @{seed_channel} has no discoverable peer channels. Try a different seed or use a keyword instead.'
+                    print(f'[scraper] STOPPED: empty seed queue')
+                    break
+                else:
+                    break
 
             if _stop_event.wait(timeout=COOLDOWN_SECONDS):
                 break
@@ -122,7 +146,7 @@ def _run_scrape(keyword, region, min_subs, max_subs, batch_size, target_category
         with _state_lock:
             _state["running"] = False
             _state["auto_batch"] = False
-            if not _state.get("error"):
+            if not _state.get("error") and not _preserve_message:
                 total_found = len(_state["results"])
                 batches_word = "batch" if batch_num == 1 else "batches"
                 channels_word = "channel" if total_found == 1 else "channels"
@@ -130,6 +154,19 @@ def _run_scrape(keyword, region, min_subs, max_subs, batch_size, target_category
                     f"All done — {total_found} {channels_word} found "
                     f"across {batch_num} {batches_word}"
                 )
+
+
+def _run_scrape_thread(*args, **kwargs):
+    try:
+        _run_scrape(*args, **kwargs)
+    except Exception as e:
+        with _state_lock:
+            _state["running"] = False
+            _state["auto_batch"] = False
+            _state["message"] = f'Scraper crashed: {str(e)}'
+            _state["error"] = str(e)
+        print(f'[scraper] FATAL ERROR: {e}')
+        traceback.print_exc()
 
 
 # ---------------------------------------------------------------------------
@@ -165,7 +202,7 @@ def start():
         activity_filter = "any"
 
     t = threading.Thread(
-        target=_run_scrape,
+        target=_run_scrape_thread,
         args=(keyword, region, min_subs, max_subs, batch_size, target_category, activity_filter, seed_channel),
         daemon=True,
     )
@@ -192,6 +229,7 @@ def status():
             "progress": _state["progress"],
             "total": _state["total"],
             "message": _state["message"],
+            "current_status": _state["message"],
             "error": _state["error"],
             "cooldown_left": int(cooldown_left),
             "results_count": len(_state["results"]),
