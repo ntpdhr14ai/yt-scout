@@ -48,6 +48,7 @@
       padding: 20px;
       margin-bottom: 20px;
     }
+    .card--flush { padding: 0; }
 
     .form-grid {
       display: grid;
@@ -121,8 +122,18 @@
     }
     .btn-export:hover { border-color: var(--accent); }
 
+    #limitNote { font-size: 0.78rem; color: var(--muted); }
+
     /* Progress */
     #progressSection { display: none; }
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+    .card-header-label { font-size: 0.85rem; font-weight: 600; }
+    .card-header-count { font-size: 0.82rem; color: var(--muted); }
     .progress-bar-wrap {
       background: var(--surface2);
       border-radius: 100px;
@@ -181,6 +192,8 @@
       font-size: 0.8rem;
       color: var(--muted);
     }
+    .results-header-left { display: flex; align-items: center; gap: 10px; }
+    .results-header-actions { display: flex; gap: 8px; }
     .queue-counter {
       background: #0c1a35;
       border: 1px solid #1e3a6e;
@@ -209,6 +222,7 @@
       font-weight: 600;
       white-space: nowrap;
     }
+    th small { text-transform: none; letter-spacing: 0; }
     td {
       padding: 11px 12px;
       border-bottom: 1px solid #1f1f1f;
@@ -374,23 +388,17 @@
   </div>
 
   <div class="btn-row">
-    <button id="startBtn" onclick="startScrape()">
-      Search Channels
-    </button>
-    <button id="stopBtn" onclick="stopScrape()">
-      Stop
-    </button>
-    <span id="limitNote" style="font-size:0.78rem;color:var(--muted)">
-      Max {{ max_batch }} channels per batch &bull; auto-continues with 10-min cooldown
-    </span>
+    <button id="startBtn">Search Channels</button>
+    <button id="stopBtn">Stop</button>
+    <span id="limitNote">Max {{ max_batch }} channels per batch &bull; auto-continues with 10-min cooldown</span>
   </div>
 </div>
 
 <!-- Progress -->
 <div class="card" id="progressSection">
-  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-    <span style="font-size:0.85rem;font-weight:600">Progress</span>
-    <span id="progressCount" style="font-size:0.82rem;color:var(--muted)">0 / 0</span>
+  <div class="card-header">
+    <span class="card-header-label">Progress</span>
+    <span class="card-header-count" id="progressCount">0 / 0</span>
   </div>
   <div class="progress-bar-wrap">
     <div class="progress-bar-fill" id="progressFill"></div>
@@ -402,17 +410,17 @@
 <!-- Results -->
 <div id="resultsSection">
   <div class="results-header">
-    <div style="display:flex;align-items:center;gap:10px">
+    <div class="results-header-left">
       <h2>Results</h2>
       <span class="count" id="resultCount">0 channels</span>
       <span class="queue-counter" id="queueCounter">Queue: 0 channels pending discovery</span>
     </div>
-    <div style="display:flex;gap:8px">
-      <button class="btn-export" onclick="exportData('csv')">Export CSV</button>
-      <button class="btn-export" onclick="exportData('excel')">Export Excel</button>
+    <div class="results-header-actions">
+      <button class="btn-export" id="exportCsvBtn">Export CSV</button>
+      <button class="btn-export" id="exportExcelBtn">Export Excel</button>
     </div>
   </div>
-  <div class="card" style="padding:0">
+  <div class="card card--flush">
     <div class="table-wrap">
       <table id="resultsTable">
         <thead>
@@ -423,9 +431,9 @@
             <th>Videos/mo</th>
             <th>Score</th>
             <th>Category</th>
-            <th>Avg Views<br><small style="text-transform:none;letter-spacing:0">Videos</small></th>
-            <th>Avg Views<br><small style="text-transform:none;letter-spacing:0">Shorts</small></th>
-            <th>Avg Views<br><small style="text-transform:none;letter-spacing:0">Live</small></th>
+            <th>Avg Views<br><small>Videos</small></th>
+            <th>Avg Views<br><small>Shorts</small></th>
+            <th>Avg Views<br><small>Live</small></th>
             <th>Contact</th>
           </tr>
         </thead>
@@ -437,11 +445,26 @@
 
 <script>
   const MAX_BATCH = {{ max_batch }};
-  const COOLDOWN_SECS = {{ cooldown_secs }};
-  let pollTimer = null;
-  let cooldownTimer = null;
-  let cooldownEnd = 0;
-  let renderedCount = 0;
+  let pollTimer        = null;
+  let cooldownInterval = null;
+  let cooldownEnd      = 0;
+  let renderedCount    = 0;
+
+  // Cached DOM references — looked up once at page load
+  const elStartBtn        = document.getElementById('startBtn');
+  const elStopBtn         = document.getElementById('stopBtn');
+  const elProgressSection = document.getElementById('progressSection');
+  const elProgressFill    = document.getElementById('progressFill');
+  const elProgressCount   = document.getElementById('progressCount');
+  const elProgressText    = document.getElementById('progressText');
+  const elStatusMsg       = document.getElementById('statusMsg');
+  const elQueueCounter    = document.getElementById('queueCounter');
+  const elResultsSection  = document.getElementById('resultsSection');
+  const elResultsBody     = document.getElementById('resultsBody');
+  const elResultCount     = document.getElementById('resultCount');
+  const elCooldownBanner  = document.getElementById('cooldownBanner');
+  const elCdTitle         = document.getElementById('cdTitle');
+  const elCooldownTimer   = document.getElementById('cooldownTimer');
 
   // -------------------------------------------------------------------------
   // Formatters
@@ -469,13 +492,14 @@
 
   function locationBadge(r) {
     const badge = r.location_badge || '?';
-    if (badge === 'TH')
-      return '<span class="badge badge-blue">TH</span>';
-    if (badge === 'TH inferred')
-      return '<span class="badge badge-th-inferred">TH ~</span>';
-    if (badge === '?')
-      return '<span class="badge badge-gray">?</span>';
+    if (badge === 'TH')          return '<span class="badge badge-blue">TH</span>';
+    if (badge === 'TH inferred') return '<span class="badge badge-th-inferred">TH ~</span>';
     return `<span class="badge badge-gray">${badge}</span>`;
+  }
+
+  function updateQueueCounter(n) {
+    elQueueCounter.style.display = n > 0 ? 'inline' : 'none';
+    if (n > 0) elQueueCounter.textContent = `Queue: ${n} channels pending discovery`;
   }
 
   // -------------------------------------------------------------------------
@@ -484,8 +508,7 @@
 
   function appendResults(newResults) {
     if (!newResults.length) return;
-    const tbody = document.getElementById('resultsBody');
-    document.getElementById('resultsSection').style.display = 'block';
+    elResultsSection.style.display = 'block';
 
     newResults.forEach(r => {
       const score = r.score ?? 0;
@@ -505,7 +528,7 @@
         </td>
         <td>${fmtNum(r.subs)}</td>
         <td>${locationBadge(r)}</td>
-        <td>${r.upload_freq != null ? r.upload_freq : '<span class="dash">—</span>'}</td>
+        <td>${fmtNum(r.upload_freq)}</td>
         <td>
           <div class="score-bar">
             <span class="score-num" style="color:${scoreColor(score)}">${score}</span>
@@ -520,12 +543,11 @@
         <td>${fmtNum(r.avg_live_views)}</td>
         <td class="contact-cell">${contact}</td>
       `;
-      tbody.appendChild(row);
+      elResultsBody.appendChild(row);
     });
 
     renderedCount += newResults.length;
-    document.getElementById('resultCount').textContent =
-      renderedCount + ' channel' + (renderedCount !== 1 ? 's' : '');
+    elResultCount.textContent = renderedCount + ' channel' + (renderedCount !== 1 ? 's' : '');
   }
 
   // -------------------------------------------------------------------------
@@ -534,26 +556,25 @@
 
   function startCooldownUI(secondsLeft, isAutoBatch) {
     cooldownEnd = Date.now() + secondsLeft * 1000;
-    document.getElementById('cdTitle').textContent = isAutoBatch
+    elCdTitle.textContent = isAutoBatch
       ? 'Cooldown active — next batch starts automatically'
       : 'Cooldown active — protecting your session';
-    document.getElementById('cooldownBanner').classList.add('visible');
-
-    if (cooldownTimer) clearInterval(cooldownTimer);
-    cooldownTimer = setInterval(() => {
+    elCooldownBanner.classList.add('visible');
+    if (cooldownInterval) return;
+    cooldownInterval = setInterval(() => {
       const left = Math.max(0, (cooldownEnd - Date.now()) / 1000);
-      document.getElementById('cooldownTimer').textContent = fmtTime(left);
+      elCooldownTimer.textContent = fmtTime(left);
       if (left <= 0) {
-        clearInterval(cooldownTimer);
-        cooldownTimer = null;
+        clearInterval(cooldownInterval);
+        cooldownInterval = null;
         if (!isAutoBatch) hideCooldown();
       }
     }, 500);
   }
 
   function hideCooldown() {
-    document.getElementById('cooldownBanner').classList.remove('visible');
-    if (cooldownTimer) { clearInterval(cooldownTimer); cooldownTimer = null; }
+    elCooldownBanner.classList.remove('visible');
+    if (cooldownInterval) { clearInterval(cooldownInterval); cooldownInterval = null; }
   }
 
   // -------------------------------------------------------------------------
@@ -565,40 +586,33 @@
       const resp = await fetch('/status');
       const data = await resp.json();
 
-      const running    = data.running;
-      const autoBatch  = data.auto_batch;
-      const isActive   = running || autoBatch;
+      const running   = data.running;
+      const autoBatch = data.auto_batch;
+      const isActive  = running || autoBatch;
 
-      document.getElementById('stopBtn').style.display = isActive ? 'inline-block' : 'none';
-      document.getElementById('startBtn').disabled = isActive;
+      elStopBtn.style.display = isActive ? 'inline-block' : 'none';
+      elStartBtn.disabled = isActive;
 
-      // Discovery queue counter
-      const queueEl = document.getElementById('queueCounter');
-      if (data.discovery_queue_size > 0) {
-        queueEl.style.display = 'inline';
-        queueEl.textContent = `Queue: ${data.discovery_queue_size} channels pending discovery`;
-      } else {
-        queueEl.style.display = 'none';
-      }
+      updateQueueCounter(data.discovery_queue_size);
 
       if (running) {
-        document.getElementById('progressSection').style.display = 'block';
+        elProgressSection.style.display = 'block';
         const pct = data.total > 0 ? Math.round((data.progress / data.total) * 100) : 0;
-        document.getElementById('progressFill').style.width = pct + '%';
-        document.getElementById('progressCount').textContent = `${data.progress} / ${data.total}`;
-        document.getElementById('progressText').textContent = data.message || '';
-        document.getElementById('statusMsg').textContent = '';
+        elProgressFill.style.width = pct + '%';
+        elProgressCount.textContent = `${data.progress} / ${data.total}`;
+        elProgressText.textContent = data.message || '';
+        elStatusMsg.textContent = '';
         hideCooldown();
       } else if (autoBatch && data.cooldown_left > 0) {
-        document.getElementById('progressSection').style.display = 'none';
+        elProgressSection.style.display = 'none';
         startCooldownUI(data.cooldown_left, true);
-        document.getElementById('statusMsg').textContent = data.message || '';
+        elStatusMsg.textContent = data.message || '';
       } else if (!isActive) {
-        document.getElementById('progressSection').style.display = 'none';
+        elProgressSection.style.display = 'none';
         hideCooldown();
-        document.getElementById('startBtn').innerHTML = 'Search Channels';
+        elStartBtn.innerHTML = 'Search Channels';
         if (data.error) {
-          document.getElementById('statusMsg').textContent = 'Error: ' + data.error;
+          elStatusMsg.textContent = 'Error: ' + data.error;
         }
       }
 
@@ -631,25 +645,30 @@
 
     const payload = {
       keyword,
-      region: document.getElementById('region').value,
-      min_subs: parseInt(document.getElementById('minSubs').value) || 1000,
-      max_subs: parseInt(document.getElementById('maxSubs').value) || 500000,
-      batch_size: batchSize,
-      vpm_filter: document.getElementById('vpmRange').value,
+      region:          document.getElementById('region').value,
+      min_subs:        parseInt(document.getElementById('minSubs').value) || 1000,
+      max_subs:        parseInt(document.getElementById('maxSubs').value) || 500000,
+      batch_size:      batchSize,
+      vpm_filter:      document.getElementById('vpmRange').value,
       target_category: document.getElementById('targetCategory').value.trim(),
     };
 
-    const btn = document.getElementById('startBtn');
-    btn.disabled = true;
-    btn.innerHTML = '<span class="spinner"></span> Searching…';
+    elStartBtn.disabled = true;
+    elStartBtn.innerHTML = '<span class="spinner"></span> Searching…';
+
+    const resetStartBtn = () => {
+      elStartBtn.disabled = false;
+      elStartBtn.innerHTML = 'Search Channels';
+      elProgressSection.style.display = 'none';
+    };
 
     renderedCount = 0;
-    document.getElementById('resultsBody').innerHTML = '';
-    document.getElementById('resultCount').textContent = '0 channels';
-    document.getElementById('queueCounter').style.display = 'none';
-    document.getElementById('resultsSection').style.display = 'none';
-    document.getElementById('progressSection').style.display = 'block';
-    document.getElementById('statusMsg').textContent = '';
+    elResultsBody.innerHTML = '';
+    elResultCount.textContent = '0 channels';
+    updateQueueCounter(0);
+    elResultsSection.style.display = 'none';
+    elProgressSection.style.display = 'block';
+    elStatusMsg.textContent = '';
     hideCooldown();
 
     try {
@@ -661,16 +680,12 @@
       const data = await resp.json();
       if (!resp.ok) {
         alert(data.error || 'Failed to start');
-        btn.disabled = false;
-        btn.innerHTML = 'Search Channels';
-        document.getElementById('progressSection').style.display = 'none';
+        resetStartBtn();
         return;
       }
     } catch(e) {
       alert('Server error: ' + e.message);
-      btn.disabled = false;
-      btn.innerHTML = 'Search Channels';
-      document.getElementById('progressSection').style.display = 'none';
+      resetStartBtn();
       return;
     }
 
@@ -679,7 +694,7 @@
   }
 
   async function stopScrape() {
-    document.getElementById('stopBtn').disabled = true;
+    elStopBtn.disabled = true;
     try {
       await fetch('/stop', { method: 'POST' });
     } catch(e) {
@@ -687,34 +702,30 @@
     }
   }
 
-  function exportData(format) {
-    window.location.href = `/export/${format}`;
-  }
-
   // -------------------------------------------------------------------------
   // Init: restore state on page load
   // -------------------------------------------------------------------------
   fetch('/status').then(r => r.json()).then(d => {
     if (d.running || d.auto_batch) {
-      document.getElementById('startBtn').disabled = true;
-      document.getElementById('stopBtn').style.display = 'inline-block';
-      document.getElementById('progressSection').style.display = 'block';
+      elStartBtn.disabled = true;
+      elStopBtn.style.display = 'inline-block';
+      elProgressSection.style.display = 'block';
       if (pollTimer) clearInterval(pollTimer);
       pollTimer = setInterval(pollStatus, 2000);
     } else if (d.cooldown_left > 0) {
       startCooldownUI(d.cooldown_left, false);
     }
     if (d.results_count > 0) {
-      fetch('/results').then(r => r.json()).then(results => {
-        appendResults(results);
-      });
+      fetch('/results').then(r => r.json()).then(results => appendResults(results));
     }
-    if (d.discovery_queue_size > 0) {
-      const queueEl = document.getElementById('queueCounter');
-      queueEl.style.display = 'inline';
-      queueEl.textContent = `Queue: ${d.discovery_queue_size} channels pending discovery`;
-    }
+    updateQueueCounter(d.discovery_queue_size);
   });
+
+  // Event listeners
+  elStartBtn.addEventListener('click', startScrape);
+  elStopBtn.addEventListener('click', stopScrape);
+  document.getElementById('exportCsvBtn').addEventListener('click', () => { window.location.href = '/export/csv'; });
+  document.getElementById('exportExcelBtn').addEventListener('click', () => { window.location.href = '/export/excel'; });
 </script>
 </body>
 </html>
