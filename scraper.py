@@ -503,19 +503,41 @@ async def _scrape_tab_views(page, url, handle, tab_name):
             if tab_name == "live" and "/streams" not in page.url:
                 print(f"[scraper] EMPTY: live tab redirected → {handle}")
                 return None
-            await asyncio.sleep(random.uniform(3, 5))
-            await page.evaluate('window.scrollBy(0, 1400)')
+            try:
+                await page.wait_for_selector(
+                    'ytd-rich-item-renderer, ytd-grid-video-renderer', timeout=8000
+                )
+            except Exception:
+                pass
+            await asyncio.sleep(random.uniform(2, 3))
+            for _ in range(4):
+                await page.evaluate('window.scrollBy(0, 500)')
+                await asyncio.sleep(1.5)
             await asyncio.sleep(2)
-            selectors = ['span.inline-metadata-item', '#metadata-line span', 'ytd-video-meta-block span', '#metadata span']
             items = []
-            for sel in selectors:
-                elements = await page.query_selector_all(sel)
-                for el in elements:
+            view_words = ['view', 'วิว', 'ครั้ง', 'watch']
+            # Primary: parse ytd-rich-item-renderer inner text line by line
+            rich_els = await page.query_selector_all('ytd-rich-item-renderer')
+            for el in rich_els:
+                try:
                     text = (await el.inner_text()).strip()
-                    if any(w in text.lower() for w in ['view', 'วิว', 'ครั้ง', 'watch']):
-                        items.append(text)
-                if items:
-                    break
+                    for line in text.split('\n'):
+                        line = line.strip()
+                        if any(w in line.lower() for w in view_words):
+                            items.append(line)
+                            break
+                except Exception:
+                    pass
+            # Fallback: span-based selectors
+            if not items:
+                for sel in ['span.inline-metadata-item', '#metadata-line span', 'ytd-video-meta-block span', '#metadata span']:
+                    elements = await page.query_selector_all(sel)
+                    for el in elements:
+                        text = (await el.inner_text()).strip()
+                        if any(w in text.lower() for w in view_words):
+                            items.append(text)
+                    if items:
+                        break
             if not items:
                 _log_retry(attempt, f"{tab_name} views empty", handle)
                 await asyncio.sleep(3)
@@ -731,21 +753,46 @@ async def scrape_channels(
             avg_video_views = await _scrape_tab_with_timeout(page, videos_url, handle, "videos")
             channel_data["avg_video_views"] = avg_video_views
 
-            # 30/60/90d recency counters — from already-loaded videos page
+            # 30/60/90d recency counters — navigate to videos tab with full scroll/wait
             videos_30d = videos_60d = videos_90d = None
             try:
+                await page.goto(videos_url, wait_until='domcontentloaded', timeout=30000)
+                await page.wait_for_load_state('networkidle', timeout=30000)
+                try:
+                    await page.wait_for_selector('ytd-rich-item-renderer', timeout=8000)
+                except Exception:
+                    pass
+                await asyncio.sleep(random.uniform(2, 3))
+                for _ in range(3):
+                    await page.evaluate('window.scrollBy(0, 600)')
+                    await asyncio.sleep(1.5)
+                await asyncio.sleep(2)
                 date_texts = []
-                for sel in ['span.inline-metadata-item', '#metadata-line span']:
-                    candidates = await page.query_selector_all(sel)
-                    for el in candidates:
-                        try:
-                            txt = (await el.inner_text()).strip()
-                            if _is_timestamp_text(txt):
-                                date_texts.append(txt)
-                        except Exception:
-                            pass
-                    if date_texts:
-                        break
+                # Primary: parse ytd-rich-item-renderer inner text line by line
+                rich_els = await page.query_selector_all('ytd-rich-item-renderer')
+                for el in rich_els[:20]:
+                    try:
+                        text = (await el.inner_text()).strip()
+                        for line in text.split('\n'):
+                            line = line.strip()
+                            if _is_timestamp_text(line):
+                                date_texts.append(line)
+                                break
+                    except Exception:
+                        pass
+                # Fallback: span-based selectors
+                if not date_texts:
+                    for sel in ['span.inline-metadata-item', '#metadata-line span']:
+                        candidates = await page.query_selector_all(sel)
+                        for el in candidates:
+                            try:
+                                txt = (await el.inner_text()).strip()
+                                if _is_timestamp_text(txt):
+                                    date_texts.append(txt)
+                            except Exception:
+                                pass
+                        if date_texts:
+                            break
                 if date_texts:
                     v30 = v60 = v90 = 0
                     for txt in date_texts[:20]:
