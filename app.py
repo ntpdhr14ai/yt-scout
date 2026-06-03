@@ -24,14 +24,14 @@ _state = {
     "batches_done": 0,
     "auto_batch": False,
     "stop_requested": False,
+    "activity_filter": "any",
 }
 _state_lock = threading.Lock()
 _stop_event = threading.Event()
 
-_CSV_FIELDS = [
-    "name", "url", "subscribers", "location_badge", "videos_30d", "videos_60d", "videos_90d",
-    "score", "category", "avg_video_views", "avg_short_views",
-    "avg_live_views", "emails", "links",
+_EXPORT_HEADERS = [
+    "Channel", "Handle", "Subscribers", "Location", "Upload Frequency",
+    "Category", "Avg Views Videos", "Avg Views Shorts", "Avg Views Live", "Contact",
 ]
 
 
@@ -46,7 +46,7 @@ def _progress_cb(done, total, msg):
         _state["message"] = msg
 
 
-def _run_scrape(keyword, region, min_subs, max_subs, batch_size, target_category):
+def _run_scrape(keyword, region, min_subs, max_subs, batch_size, target_category, activity_filter):
     _stop_event.clear()
     with _state_lock:
         _state["error"] = None
@@ -58,6 +58,7 @@ def _run_scrape(keyword, region, min_subs, max_subs, batch_size, target_category
         _state["auto_batch"] = True
         _state["batches_done"] = 0
         _state["cooldown_until"] = 0
+        _state["activity_filter"] = activity_filter
 
     seen_handles: set = set()
     batch_num = 0
@@ -83,6 +84,7 @@ def _run_scrape(keyword, region, min_subs, max_subs, batch_size, target_category
                     seen_handles=seen_handles,
                     scroll_passes=scroll_passes,
                     target_category=target_category,
+                    activity_filter=activity_filter,
                 )
             )
 
@@ -154,10 +156,13 @@ def start():
     max_subs = max(min_subs, int(data.get("max_subs", 10_000_000)))
     batch_size = min(int(data.get("batch_size", 5)), MAX_CHANNELS_PER_BATCH)
     target_category = (data.get("target_category") or "").strip()
+    activity_filter = data.get("activity_filter", "any")
+    if activity_filter not in ("30", "60", "90", "any"):
+        activity_filter = "any"
 
     t = threading.Thread(
         target=_run_scrape,
-        args=(keyword, region, min_subs, max_subs, batch_size, target_category),
+        args=(keyword, region, min_subs, max_subs, batch_size, target_category, activity_filter),
         daemon=True,
     )
     t.start()
@@ -188,6 +193,7 @@ def status():
             "auto_batch": _state["auto_batch"],
             "batches_done": _state["batches_done"],
             "discovery_queue_size": len(discovery_queue),
+            "activity_filter": _state["activity_filter"],
         })
 
 
@@ -203,7 +209,7 @@ def export_csv():
         rows = list(_state["results"])
 
     output = io.StringIO()
-    writer = csv.DictWriter(output, fieldnames=_CSV_FIELDS, extrasaction="ignore")
+    writer = csv.DictWriter(output, fieldnames=_EXPORT_HEADERS, extrasaction="ignore")
     writer.writeheader()
     for row in rows:
         writer.writerow(_flatten_row(row))
@@ -223,10 +229,10 @@ def export_excel():
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "YT Scout"
-    ws.append(_CSV_FIELDS)
+    ws.append(_EXPORT_HEADERS)
     for row in rows:
         flat = _flatten_row(row)
-        ws.append([flat.get(f, "") for f in _CSV_FIELDS])
+        ws.append([flat.get(f, "") for f in _EXPORT_HEADERS])
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -239,21 +245,18 @@ def export_excel():
 
 
 def _flatten_row(r: dict) -> dict:
+    contact_parts = list(r.get("emails") or []) + list(r.get("links") or [])
     return {
-        "name": _fmt(r.get("name")),
-        "url": _fmt(r.get("url")),
-        "subscribers": _fmt(r.get("subs")),
-        "location_badge": _fmt(r.get("location_badge")),
-        "videos_30d": _fmt(r.get("videos_30d")),
-        "videos_60d": _fmt(r.get("videos_60d")),
-        "videos_90d": _fmt(r.get("videos_90d")),
-        "score": _fmt(r.get("score")),
-        "category": _fmt(r.get("category")),
-        "avg_video_views": _fmt(r.get("avg_video_views")),
-        "avg_short_views": _fmt(r.get("avg_short_views")),
-        "avg_live_views": _fmt(r.get("avg_live_views")),
-        "emails": "; ".join(r.get("emails") or []),
-        "links": "; ".join(r.get("links") or []),
+        "Channel": _fmt(r.get("name")),
+        "Handle": _fmt(r.get("url")),
+        "Subscribers": _fmt(r.get("subs")),
+        "Location": _fmt(r.get("location_badge")),
+        "Upload Frequency": _fmt(r.get("upload_frequency")),
+        "Category": _fmt(r.get("category")),
+        "Avg Views Videos": _fmt(r.get("avg_video_views")),
+        "Avg Views Shorts": _fmt(r.get("avg_short_views")),
+        "Avg Views Live": _fmt(r.get("avg_live_views")),
+        "Contact": "; ".join(contact_parts) or "—",
     }
 
 

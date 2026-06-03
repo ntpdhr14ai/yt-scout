@@ -353,6 +353,15 @@
       <label>Batch Size (max {{ max_batch }})</label>
       <input type="number" id="batchSize" value="5" min="1" max="{{ max_batch }}" />
     </div>
+    <div class="form-group">
+      <label>Activity Filter</label>
+      <select id="activityFilter">
+        <option value="any">Any (show last 30d)</option>
+        <option value="30">Last 30 days</option>
+        <option value="60">Last 60 days</option>
+        <option value="90">Last 90 days</option>
+      </select>
+    </div>
     <div class="form-group wide">
       <label>Target Category (Optional)</label>
       <select id="targetCategory">
@@ -417,10 +426,7 @@
             <th>Channel</th>
             <th>Subscribers</th>
             <th>Location</th>
-            <th>30d</th>
-            <th>60d</th>
-            <th>90d</th>
-            <th>Score</th>
+            <th id="uploadFreqHeader">Upload Frequency<br><small style="font-weight:normal; opacity:0.6;">last 30 days</small></th>
             <th>Category</th>
             <th>Avg Views<br><small>Videos</small></th>
             <th>Avg Views<br><small>Shorts</small></th>
@@ -512,7 +518,7 @@
       const category = r.category || '<span class="dash">—</span>';
 
       const row = document.createElement('tr');
-      const fmtCount = v => (v === null || v === undefined) ? '<span class="dash">—</span>' : v.toString();
+      const fmtFreq = v => (v === null || v === undefined || v === '—') ? '<span class="dash">—</span>' : v.toString();
       row.innerHTML = `
         <td class="channel-name">
           <a href="${r.url}" target="_blank" rel="noopener">${r.name || r.url}</a>
@@ -520,17 +526,7 @@
         </td>
         <td>${fmtNum(r.subs)}</td>
         <td>${locationBadge(r)}</td>
-        <td>${fmtCount(r.videos_30d)}</td>
-        <td>${fmtCount(r.videos_60d)}</td>
-        <td>${fmtCount(r.videos_90d)}</td>
-        <td>
-          <div class="score-bar">
-            <span class="score-num" style="color:${scoreColor(score)}">${score}</span>
-            <div class="score-track">
-              <div class="score-fill" style="width:${score}%;background:${scoreColor(score)}"></div>
-            </div>
-          </div>
-        </td>
+        <td>${fmtFreq(r.upload_frequency)}</td>
         <td>${category}</td>
         <td>${fmtNum(r.avg_video_views)}</td>
         <td>${fmtNum(r.avg_short_views)}</td>
@@ -637,6 +633,11 @@
     const batchSize = Math.min(parseInt(document.getElementById('batchSize').value) || 5, MAX_BATCH);
     document.getElementById('batchSize').value = batchSize;
 
+    const activityFilter = document.getElementById('activityFilter').value;
+    const freqDays = activityFilter === 'any' ? 30 : parseInt(activityFilter);
+    document.getElementById('uploadFreqHeader').innerHTML =
+      `Upload Frequency<br><small style="font-weight:normal; opacity:0.6;">last ${freqDays} days</small>`;
+
     const payload = {
       keyword,
       region:          document.getElementById('region').value,
@@ -644,6 +645,7 @@
       max_subs:        parseInt(document.getElementById('maxSubs').value) || 500000,
       batch_size:      batchSize,
       target_category: document.getElementById('targetCategory').value.trim(),
+      activity_filter: activityFilter,
     };
 
     elStartBtn.disabled = true;
@@ -699,6 +701,11 @@
   // Init: restore state on page load
   // -------------------------------------------------------------------------
   fetch('/status').then(r => r.json()).then(d => {
+    const af = d.activity_filter || 'any';
+    const freqDays = af === 'any' ? 30 : parseInt(af);
+    document.getElementById('uploadFreqHeader').innerHTML =
+      `Upload Frequency<br><small style="font-weight:normal; opacity:0.6;">last ${freqDays} days</small>`;
+
     if (d.running || d.auto_batch) {
       elStartBtn.disabled = true;
       elStopBtn.style.display = 'inline-block';

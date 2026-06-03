@@ -604,6 +604,7 @@ async def scrape_channels(
     seen_handles: set | None = None,
     scroll_passes: int = 0,
     target_category: str = '',
+    activity_filter: str = 'any',
 ) -> list[dict]:
     if seen_handles is None:
         seen_handles = set()
@@ -875,6 +876,10 @@ async def scrape_channels(
                 location_badge,
             )
             channel_data["url"] = ch_url
+
+            _days_map = {'30': 'videos_30d', '60': 'videos_60d', '90': 'videos_90d', 'any': 'videos_30d'}
+            channel_data['upload_frequency'] = channel_data.get(_days_map.get(activity_filter, 'videos_30d')) or '—'
+
             results.append(channel_data)
 
             processed_handles.add(handle_bare)
