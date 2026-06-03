@@ -138,33 +138,19 @@ def _months_ago(text: str) -> float | None:
     d = _days_ago(text)
     return d / 30 if d is not None else None
 
-def parse_recency(text: str) -> int | None:
-    t = text.lower()
-    if 'hour' in t or 'minute' in t or 'just now' in t:
-        return 0
-    if 'day' in t:
-        n = int(''.join(c for c in t if c.isdigit()) or 1)
-        return n
-    if 'week' in t:
-        n = int(''.join(c for c in t if c.isdigit()) or 1)
-        return n * 7
-    if 'month' in t:
-        n = int(''.join(c for c in t if c.isdigit()) or 1)
-        return n * 30
-    if 'year' in t:
-        return 999
-    if 'วัน' in t:
-        n = int(''.join(c for c in t if c.isdigit()) or 1)
-        return n
-    if 'สัปดาห์' in t:
-        n = int(''.join(c for c in t if c.isdigit()) or 1)
-        return n * 7
-    if 'เดือน' in t:
-        n = int(''.join(c for c in t if c.isdigit()) or 1)
-        return n * 30
-    if 'ปี' in t:
-        return 999
-    return None
+def parse_recency(text: str) -> int:
+    if not text: return 999
+    t = text.lower().strip()
+    for prefix in ['streamed','premiered','updated','scheduled','เผยแพร่เมื่อ','สตรีมเมื่อ','อัปเดตเมื่อ']:
+        t = t.replace(prefix, '').strip()
+    num = lambda s: int(re.search(r'\d+', s).group()) if re.search(r'\d+', s) else 1
+    if any(w in t for w in ['just now','moments','เพิ่งอัป','ไม่กี่วินาที','ไม่กี่นาที']): return 0
+    if any(w in t for w in ['hour','ชั่วโมง','ชม.']): return 0
+    if any(w in t for w in ['day','วัน']): return num(t)
+    if any(w in t for w in ['week','สัปดาห์']): return num(t) * 7
+    if any(w in t for w in ['month','เดือน']): return num(t) * 30
+    if any(w in t for w in ['year','ปี']): return 999
+    return 999
 
 def _name_should_drop(name: str, handle: str) -> bool:
     combined = (name + " " + handle).lower()
@@ -606,6 +592,7 @@ async def scrape_channels(
     scroll_passes: int = 0,
     target_category: str = '',
     activity_filter: str = 'any',
+    seed_channel: str = '',
 ) -> list[dict]:
     if seen_handles is None:
         seen_handles = set()
@@ -633,52 +620,57 @@ async def scrape_channels(
         page = await context.new_page()
         await _stealth.apply_stealth_async(page)
 
-        # Search
-        search_url = (
-            f"https://www.youtube.com/results?search_query={quote_plus(keyword)}"
-            f"&sp=EgIQAg%253D%253D&gl={region}"
-        )
-        print(f"[scraper] Navigating to search: {search_url}")
-        await page.goto(search_url, wait_until="domcontentloaded")
-        await asyncio.sleep(_rand_delay(3, 6))
-        print(f"[scraper] Search page title: {await page.title()!r}")
-
-        try:
-            accept_btn = page.locator("button", has_text="Accept all")
-            if await accept_btn.count() > 0:
-                await accept_btn.first.click()
-                await asyncio.sleep(2)
-                print("[scraper] Cookie dialog dismissed")
-        except Exception:
-            pass
-
-        for _ in range(scroll_passes):
-            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            await asyncio.sleep(_rand_delay(2, 4))
-
-        # Collect channel links from search
+        # Search or seed mode
         channel_links: list[str] = []
-        attempts = 0
-        while len(channel_links) < batch_size and attempts < 8:
-            anchors = await page.locator("a#main-link.channel-link").all()
-            print(f"[scraper] Link collection attempt {attempts + 1}: {len(anchors)} anchors visible")
-            for a in anchors:
-                href = await a.get_attribute("href")
-                if (
-                    href
-                    and "/@" in href
-                    and href not in channel_links
-                    and href not in seen_handles
-                ):
-                    channel_links.append(href)
-            if len(channel_links) < batch_size:
-                await page.evaluate("window.scrollBy(0, 800)")
-                await asyncio.sleep(_rand_delay(2, 4))
-            attempts += 1
+        if seed_channel and not keyword:
+            print(f"[scraper] SEED MODE: starting from @{seed_channel} channels tab")
+            new_handles = await discover_from_channels_tab(page, seed_channel)
+            n = len(discovery_queue)
+            print(f"[scraper] SEED MODE: starting from @{seed_channel} channels tab — {n} handles queued")
+        else:
+            search_url = (
+                f"https://www.youtube.com/results?search_query={quote_plus(keyword)}"
+                f"&sp=EgIQAg%253D%253D&gl={region}"
+            )
+            print(f"[scraper] Navigating to search: {search_url}")
+            await page.goto(search_url, wait_until="domcontentloaded")
+            await asyncio.sleep(_rand_delay(3, 6))
+            print(f"[scraper] Search page title: {await page.title()!r}")
 
-        channel_links = channel_links[:batch_size]
-        for link in channel_links:
-            seen_handles.add(link)
+            try:
+                accept_btn = page.locator("button", has_text="Accept all")
+                if await accept_btn.count() > 0:
+                    await accept_btn.first.click()
+                    await asyncio.sleep(2)
+                    print("[scraper] Cookie dialog dismissed")
+            except Exception:
+                pass
+
+            for _ in range(scroll_passes):
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await asyncio.sleep(_rand_delay(2, 4))
+
+            attempts = 0
+            while len(channel_links) < batch_size and attempts < 8:
+                anchors = await page.locator("a#main-link.channel-link").all()
+                print(f"[scraper] Link collection attempt {attempts + 1}: {len(anchors)} anchors visible")
+                for a in anchors:
+                    href = await a.get_attribute("href")
+                    if (
+                        href
+                        and "/@" in href
+                        and href not in channel_links
+                        and href not in seen_handles
+                    ):
+                        channel_links.append(href)
+                if len(channel_links) < batch_size:
+                    await page.evaluate("window.scrollBy(0, 800)")
+                    await asyncio.sleep(_rand_delay(2, 4))
+                attempts += 1
+
+            channel_links = channel_links[:batch_size]
+            for link in channel_links:
+                seen_handles.add(link)
 
         # Add discovery queue items from prior batches (Change 5)
         disc_added = []
@@ -773,7 +765,7 @@ async def scrape_channels(
             channel_data["avg_video_views"] = avg_video_views
 
             # 30/60/90d recency counters — navigate to videos tab with full scroll/wait
-            videos_30d = videos_60d = videos_90d = None
+            videos_30d = videos_60d = videos_90d = 0
             try:
                 await page.goto(videos_url, wait_until='domcontentloaded', timeout=30000)
                 await page.wait_for_load_state('networkidle', timeout=30000)
@@ -816,28 +808,29 @@ async def scrape_channels(
                     v30 = v60 = v90 = 0
                     for txt in date_texts[:20]:
                         days = parse_recency(txt)
-                        if days is not None:
-                            if days <= 30:
-                                v30 += 1
-                            if days <= 60:
-                                v60 += 1
-                            if days <= 90:
-                                v90 += 1
+                        if days <= 30:
+                            v30 += 1
+                        if days <= 60:
+                            v60 += 1
+                        if days <= 90:
+                            v90 += 1
                     videos_30d, videos_60d, videos_90d = v30, v60, v90
                 _log_ok("videos_30/60/90d", f"{videos_30d}/{videos_60d}/{videos_90d}", handle)
             except Exception as e:
+                videos_30d = videos_60d = videos_90d = 0
+                print(f'[scraper] FAIL-CLOSED: {handle} — recency parse failed, treating as inactive')
                 _log_failed("videos_30/60/90d", handle, e)
             channel_data["videos_30d"] = videos_30d
             channel_data["videos_60d"] = videos_60d
             channel_data["videos_90d"] = videos_90d
 
-            # Fix 1: Activity gate — hard exit before Shorts/Live scraping
+            # Activity gate — hard exit before Shorts/Live scraping
             if activity_filter != 'any':
                 days = int(activity_filter)
                 count_map = {'30': videos_30d, '60': videos_60d, '90': videos_90d}
                 count = count_map.get(activity_filter) or 0
-                if count < 1:
-                    print(f'[scraper] SKIPPED: {handle} — 0 uploads in last {days}d (dead channel)')
+                if count < 2:
+                    print(f'[scraper] SKIPPED: {handle} — only {count} upload(s) in last {days}d, minimum is 2')
                     processed_handles.add(handle_bare)
                     await asyncio.sleep(_rand_delay(2, 5))
                     continue

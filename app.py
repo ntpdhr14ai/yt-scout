@@ -47,7 +47,7 @@ def _progress_cb(done, total, msg):
         _state["message"] = msg
 
 
-def _run_scrape(keyword, region, min_subs, max_subs, batch_size, target_category, activity_filter):
+def _run_scrape(keyword, region, min_subs, max_subs, batch_size, target_category, activity_filter, seed_channel=''):
     _stop_event.clear()
     with _state_lock:
         _state["error"] = None
@@ -86,6 +86,7 @@ def _run_scrape(keyword, region, min_subs, max_subs, batch_size, target_category
                     scroll_passes=scroll_passes,
                     target_category=target_category,
                     activity_filter=activity_filter,
+                    seed_channel=seed_channel,
                 )
             )
 
@@ -150,8 +151,9 @@ def start():
 
     data = request.json or {}
     keyword = (data.get("keyword") or "").strip()
-    if not keyword:
-        return jsonify({"error": "keyword required"}), 400
+    seed_channel = (data.get("seed_channel") or "").strip().lstrip("@")
+    if not keyword and not seed_channel:
+        return jsonify({"error": "Please provide either a keyword or a seed channel handle."}), 400
 
     region = data.get("region", "TH")
     min_subs = max(0, int(data.get("min_subs", 1000)))
@@ -164,7 +166,7 @@ def start():
 
     t = threading.Thread(
         target=_run_scrape,
-        args=(keyword, region, min_subs, max_subs, batch_size, target_category, activity_filter),
+        args=(keyword, region, min_subs, max_subs, batch_size, target_category, activity_filter, seed_channel),
         daemon=True,
     )
     t.start()
