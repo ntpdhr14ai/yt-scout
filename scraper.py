@@ -2,6 +2,7 @@ import re
 import sys
 import random
 import asyncio
+from collections import deque
 from urllib.parse import quote_plus
 from playwright.async_api import async_playwright
 from playwright_stealth import Stealth
@@ -13,10 +14,10 @@ _stealth = Stealth()
 
 MAX_CHANNELS_PER_BATCH = 10
 COOLDOWN_SECONDS = 600
+_YOUTUBE_TITLE_SUFFIX = " - YouTube"
 
-# Change 5 — module-level discovery state
 processed_handles: set = set()
-discovery_queue: list = []
+discovery_queue: deque = deque()
 
 # ---------------------------------------------------------------------------
 # Stage 1 — name-based drop keywords
@@ -46,6 +47,8 @@ _NON_THAI_COUNTRIES = {
     "nz", "ar", "co", "cl", "ua", "pl", "pt", "gr", "uk",
 }
 
+_NON_THAI_LONG = frozenset(n for n in _NON_THAI_COUNTRIES if len(n) > 2)
+
 _COUNTRY_RE = re.compile(
     r"^[A-Z]{2}$|Thailand|United States|United Kingdom|Japan|South Korea|"
     r"Korea|China|India|Brazil|Indonesia|Vietnam|Philippines|Malaysia|"
@@ -62,6 +65,11 @@ _TIME_WORDS = {
     "ago", "hour", "hours", "day", "days", "week", "weeks",
     "month", "months", "year", "years",
     "วัน", "เดือน", "ปี", "ชั่วโมง", "สัปดาห์", "ที่แล้ว", "ผ่านมา",
+}
+
+_VPM_RANGES = {
+    '0-10': (0, 10), '11-20': (11, 20), '21-30': (21, 30),
+    '31-40': (31, 40), '50plus': (50, 99999),
 }
 
 # ---------------------------------------------------------------------------
@@ -104,18 +112,8 @@ def _parse_sub_count(text: str) -> int | None:
     suffix = m.group(2).upper()
     return int(value * {"K": 1_000, "M": 1_000_000, "B": 1_000_000_000}.get(suffix, 1))
 
-# Change 4 — view count parser
-def parse_view_count(text):
-    text = text.lower().replace(',', '').strip()
-    try:
-        if 'k' in text:
-            return int(float(text.replace('k', '').strip()) * 1000)
-        if 'm' in text:
-            return int(float(text.replace('m', '').strip()) * 1000000)
-        digits = ''.join(c for c in text if c.isdigit())
-        return int(digits) if digits else None
-    except Exception:
-        return None
+def parse_view_count(text: str) -> int | None:
+    return _parse_sub_count(text)
 
 def _days_ago(text: str) -> float | None:
     if not text:
@@ -166,9 +164,9 @@ def _is_non_thai_country(country: str) -> bool:
         return False
     if c in _NON_THAI_COUNTRIES:
         return True
-    if re.match(r"^[a-z]{2}$", c):
+    if len(c) == 2 and c.isalpha():
         return True
-    return any(len(n) > 2 and n in c for n in _NON_THAI_COUNTRIES)
+    return any(n in c for n in _NON_THAI_LONG)
 
 def _is_timestamp_text(txt: str) -> bool:
     t = txt.lower()
@@ -336,8 +334,8 @@ async def _scrape_about(page, ch_url: str, handle: str) -> tuple[dict, bool, str
         name = ""
         try:
             title = await page.title()
-            if title and " - YouTube" in title:
-                name = title.replace(" - YouTube", "").strip()
+            if title and _YOUTUBE_TITLE_SUFFIX in title:
+                name = title.replace(_YOUTUBE_TITLE_SUFFIX, "").strip()
                 _log_ok("name (title)", name, handle)
         except Exception as e:
             _log_failed("name (title)", handle, e)
@@ -480,20 +478,14 @@ async def _scrape_about(page, ch_url: str, handle: str) -> tuple[dict, bool, str
 
     return data, True, location_badge
 
-# ---------------------------------------------------------------------------
-# Change 4 — single reusable tab views scraper
-# ---------------------------------------------------------------------------
-
-async def scrape_tab_views(page, url, handle, tab_name):
+async def _scrape_tab_views(page, url, handle, tab_name):
     for attempt in range(1, 4):
         try:
-            print(f'[scraper] START: {tab_name} views → {handle} (attempt {attempt})')
+            _log_start(f"{tab_name} views (attempt {attempt})", handle)
             await page.goto(url, wait_until='domcontentloaded', timeout=30000)
             await page.wait_for_load_state('networkidle', timeout=30000)
             await asyncio.sleep(random.uniform(3, 5))
-            await page.evaluate('window.scrollBy(0, 700)')
-            await asyncio.sleep(2)
-            await page.evaluate('window.scrollBy(0, 700)')
+            await page.evaluate('window.scrollBy(0, 1400)')
             await asyncio.sleep(2)
             selectors = ['span.inline-metadata-item', '#metadata-line span', 'ytd-video-meta-block span', '#metadata span']
             items = []
@@ -506,7 +498,7 @@ async def scrape_tab_views(page, url, handle, tab_name):
                 if items:
                     break
             if not items:
-                print(f'[scraper] RETRY {attempt}: {tab_name} views empty → {handle}')
+                _log_retry(attempt, f"{tab_name} views empty", handle)
                 await asyncio.sleep(3)
                 continue
             numbers = []
@@ -515,10 +507,10 @@ async def scrape_tab_views(page, url, handle, tab_name):
                 if n:
                     numbers.append(n)
             avg = int(sum(numbers) / len(numbers)) if numbers else None
-            print(f'[scraper] OK: {tab_name}_avg_views = {avg} → {handle}')
+            _log_ok(f"{tab_name}_avg_views", avg, handle)
             return avg
         except Exception as e:
-            print(f'[scraper] FAILED: {tab_name} views → {handle} — reason: {e}')
+            _log_failed(f"{tab_name} views", handle, e)
             await asyncio.sleep(3)
     return None
 
@@ -526,7 +518,7 @@ async def scrape_tab_views(page, url, handle, tab_name):
 async def _scrape_tab_with_timeout(page, url, handle, tab_name):
     try:
         return await asyncio.wait_for(
-            scrape_tab_views(page, url, handle, tab_name), timeout=90
+            _scrape_tab_views(page, url, handle, tab_name), timeout=90
         )
     except asyncio.TimeoutError:
         print(f'[scraper] TIMEOUT: {tab_name} → {handle} — exceeded 90s limit')
@@ -536,7 +528,7 @@ async def _scrape_tab_with_timeout(page, url, handle, tab_name):
         return None
 
 # ---------------------------------------------------------------------------
-# Change 5 — channels tab discovery
+# Channels tab discovery
 # ---------------------------------------------------------------------------
 
 async def discover_from_channels_tab(page, handle):
@@ -649,7 +641,7 @@ async def scrape_channels(
         # Add discovery queue items from prior batches (Change 5)
         disc_added = []
         while discovery_queue and (len(channel_links) + len(disc_added)) < batch_size * 2:
-            h = discovery_queue.pop(0)
+            h = discovery_queue.popleft()
             if h not in processed_handles:
                 disc_path = f'/@{h}'
                 if disc_path not in channel_links and disc_path not in disc_added:
@@ -676,8 +668,8 @@ async def scrape_channels(
 
             try:
                 early_title = await page.title()
-                if early_title and " - YouTube" in early_title:
-                    early_name = early_title.replace(" - YouTube", "").strip()
+                if early_title and _YOUTUBE_TITLE_SUFFIX in early_title:
+                    early_name = early_title.replace(_YOUTUBE_TITLE_SUFFIX, "").strip()
                     if _name_should_drop(early_name, handle):
                         _log_dropped(handle, f"name '{early_name}' matches Stage-1 keyword")
                         await asyncio.sleep(_rand_delay(1, 3))
@@ -688,7 +680,7 @@ async def scrape_channels(
             subs = await _scrape_subs(page, ch_url, handle)
             sub_pending = subs is None
 
-            if not sub_pending and subs is not None:
+            if not sub_pending:
                 if subs < min_subs or subs > max_subs:
                     _log_dropped(handle, f"subs {subs} outside range [{min_subs}, {max_subs}]")
                     await asyncio.sleep(_rand_delay(2, 5))
@@ -721,7 +713,7 @@ async def scrape_channels(
             avg_video_views = await _scrape_tab_with_timeout(page, videos_url, handle, "videos")
             channel_data["avg_video_views"] = avg_video_views
 
-            # Category extraction (Change 3) — from videos tab page after load
+            # Category extraction — from videos tab page after load
             category = None
             try:
                 el = await page.query_selector('meta[itemprop="genre"]')
@@ -770,16 +762,12 @@ async def scrape_channels(
                 channel_data["upload_freq"] = None
 
             # VPM filter (Rule B) — only skip if upload_freq is a real extracted number
-            _vpm_ranges = {
-                '0-10': (0, 10), '11-20': (11, 20), '21-30': (21, 30),
-                '31-40': (31, 40), '50plus': (50, 99999),
-            }
             upload_freq_val = channel_data.get("upload_freq")
             if upload_freq_val is None:
                 channel_data["upload_freq"] = "Pending Check"
                 print(f'[scraper] PENDING: videos/month unextractable → {handle}, continuing')
             elif vpm_filter != 'any' and isinstance(upload_freq_val, (int, float)):
-                lo, hi = _vpm_ranges[vpm_filter]
+                lo, hi = _VPM_RANGES[vpm_filter]
                 if not (lo <= upload_freq_val <= hi):
                     print(f'[scraper] SKIPPED: {handle} — videos/month {upload_freq_val} outside {vpm_filter}')
                     await asyncio.sleep(_rand_delay(2, 5))
@@ -818,7 +806,7 @@ async def scrape_channels(
                     f"Done {channel_data.get('name', handle)}",
                 )
 
-            # Channel discovery (Change 5) — only when category filter matches
+            # Channel discovery — only when category filter matches
             if target_category and channel_data.get("category"):
                 if target_category.lower() in channel_data["category"].lower():
                     try:
