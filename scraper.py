@@ -18,6 +18,7 @@ _YOUTUBE_TITLE_SUFFIX = " - YouTube"
 
 processed_handles: set = set()
 discovery_queue: deque = deque()
+stop_requested: bool = False
 
 # ---------------------------------------------------------------------------
 # Stage 1 — name-based drop keywords
@@ -707,6 +708,8 @@ async def scrape_channels(
             await page.goto(ch_url, wait_until="domcontentloaded")
             await asyncio.sleep(random.uniform(3, 5))
 
+            ch_canonical_url = ch_url  # resolved after _scrape_about below
+
             try:
                 early_title = await page.title()
                 if early_title and _YOUTUBE_TITLE_SUFFIX in early_title:
@@ -719,15 +722,35 @@ async def scrape_channels(
                 pass
 
             subs = await _scrape_subs(page, ch_url, handle)
-            sub_pending = subs is None
-
-            if not sub_pending:
-                if subs < min_subs or subs > max_subs:
-                    _log_dropped(handle, f"subs {subs} outside range [{min_subs}, {max_subs}]")
-                    await asyncio.sleep(_rand_delay(2, 5))
-                    continue
+            if subs is None:
+                print(f'[scraper] SKIPPED: {handle} — could not parse subscriber count')
+                continue
+            if not (min_subs <= subs <= max_subs):
+                print(f'[scraper] SKIPPED: {handle} — subs {subs} outside range {min_subs}-{max_subs}')
+                continue
 
             channel_data, keep, location_badge = await _scrape_about(page, ch_url, handle)
+
+            # Extract UC ID from /about page source (page is reliably on /about after _scrape_about)
+            uc_id = None
+            try:
+                src = await page.content()
+                m = re.search(r'"externalId"\s*:\s*"(UC[\w-]+)"', src)
+                if m:
+                    uc_id = m.group(1)
+            except Exception:
+                pass
+            if not uc_id:
+                try:
+                    canon = await page.get_attribute('link[rel="canonical"]', "href")
+                    if canon:
+                        m = re.search(r'/channel/(UC[\w-]+)', canon)
+                        if m:
+                            uc_id = m.group(1)
+                except Exception:
+                    pass
+            _log_ok("uc_id", uc_id, handle)
+            ch_canonical_url = f'https://www.youtube.com/channel/{uc_id}' if uc_id else ch_url
 
             if not keep:
                 await asyncio.sleep(_rand_delay(2, 5))
@@ -739,12 +762,7 @@ async def scrape_channels(
                 await asyncio.sleep(_rand_delay(2, 5))
                 continue
 
-            if not sub_pending:
-                channel_data["subs"] = subs
-            else:
-                about_subs = _parse_sub_count(channel_data.get("sub_text", ""))
-                channel_data["subs"] = about_subs if about_subs is not None else "Pending Check"
-
+            channel_data["subs"] = subs
             channel_data["location_badge"] = location_badge
 
             await asyncio.sleep(_rand_delay(5, 10))
@@ -813,60 +831,79 @@ async def scrape_channels(
             channel_data["videos_60d"] = videos_60d
             channel_data["videos_90d"] = videos_90d
 
-            # Category extraction — navigate to first video page
-            category = None
-            try:
-                first_video_href = None
-                for v_sel in ['a#video-title-link', 'ytd-rich-item-renderer a#thumbnail', 'a[href*="/watch?v="]']:
-                    el = await page.query_selector(v_sel)
-                    if el:
-                        href = await el.get_attribute('href')
-                        if href and '/watch' in href:
-                            first_video_href = href
-                            break
-                if first_video_href:
-                    if first_video_href.startswith('/'):
-                        first_video_href = f'https://www.youtube.com{first_video_href}'
-                    await page.goto(first_video_href, wait_until='networkidle', timeout=30000)
-                    el = await page.query_selector('meta[itemprop="genre"]')
-                    if el:
-                        category = await el.get_attribute('content')
-                    if not category:
-                        el = await page.query_selector('meta[property="og:video:tag"]')
-                        if el:
-                            category = await el.get_attribute('content')
-                    _log_ok("category", category, handle)
-                    await asyncio.sleep(random.uniform(3, 5))
-                    await page.goto(videos_url, wait_until='domcontentloaded', timeout=20000)
-                else:
-                    _log_failed("category", handle, "no first video link found")
-            except Exception as e:
-                _log_failed("category", handle, e)
-            channel_data["category"] = category or ""
-
-            # Category filter (Rule A) — only skip if category extracted AND doesn't match
-            if target_category:
-                if not category:
-                    channel_data["category"] = "Pending Check"
-                    print(f"[scraper] PENDING: category unextractable → {handle}, continuing")
-                elif target_category.lower() not in category.lower():
-                    print(f"[scraper] SKIPPED: {handle} — category '{category}' does not match target '{target_category}'")
+            # Fix 1: Activity gate — hard exit before Shorts/Live scraping
+            if activity_filter != 'any':
+                days = int(activity_filter)
+                count_map = {'30': videos_30d, '60': videos_60d, '90': videos_90d}
+                count = count_map.get(activity_filter) or 0
+                if count < 1:
+                    print(f'[scraper] SKIPPED: {handle} — 0 uploads in last {days}d (dead channel)')
+                    processed_handles.add(handle_bare)
                     await asyncio.sleep(_rand_delay(2, 5))
                     continue
 
-            await asyncio.sleep(_rand_delay(5, 10))
+            skip_tabs = (videos_30d == 0 and videos_60d == 0 and videos_90d == 0)
+            if skip_tabs:
+                print(f'[scraper] SKIPPED tabs: {handle} — no uploads detected in 90d window, skipping view scraping')
+                channel_data["avg_video_views"] = None
+                channel_data["avg_short_views"] = None
+                channel_data["avg_live_views"] = None
+                channel_data["category"] = ""
+            else:
+                # Category extraction — navigate to first video page
+                category = None
+                try:
+                    first_video_href = None
+                    for v_sel in ['a#video-title-link', 'ytd-rich-item-renderer a#thumbnail', 'a[href*="/watch?v="]']:
+                        el = await page.query_selector(v_sel)
+                        if el:
+                            href = await el.get_attribute('href')
+                            if href and '/watch' in href:
+                                first_video_href = href
+                                break
+                    if first_video_href:
+                        if first_video_href.startswith('/'):
+                            first_video_href = f'https://www.youtube.com{first_video_href}'
+                        await page.goto(first_video_href, wait_until='networkidle', timeout=30000)
+                        el = await page.query_selector('meta[itemprop="genre"]')
+                        if el:
+                            category = await el.get_attribute('content')
+                        if not category:
+                            el = await page.query_selector('meta[property="og:video:tag"]')
+                            if el:
+                                category = await el.get_attribute('content')
+                        _log_ok("category", category, handle)
+                        await asyncio.sleep(random.uniform(3, 5))
+                        await page.goto(videos_url, wait_until='domcontentloaded', timeout=20000)
+                    else:
+                        _log_failed("category", handle, "no first video link found")
+                except Exception as e:
+                    _log_failed("category", handle, e)
+                channel_data["category"] = category or ""
 
-            # Shorts tab (Rule C/D)
-            shorts_url = ch_url.rstrip("/") + "/shorts"
-            avg_short_views = await _scrape_tab_with_timeout(page, shorts_url, handle, "shorts")
-            channel_data["avg_short_views"] = avg_short_views
+                # Category filter (Rule A) — only skip if category extracted AND doesn't match
+                if target_category:
+                    if not category:
+                        channel_data["category"] = "Pending Check"
+                        print(f"[scraper] PENDING: category unextractable → {handle}, continuing")
+                    elif target_category.lower() not in category.lower():
+                        print(f"[scraper] SKIPPED: {handle} — category '{category}' does not match target '{target_category}'")
+                        await asyncio.sleep(_rand_delay(2, 5))
+                        continue
 
-            await asyncio.sleep(_rand_delay(5, 10))
+                await asyncio.sleep(_rand_delay(5, 10))
 
-            # Live tab (Rule C/D)
-            live_url = ch_url.rstrip("/") + "/streams"
-            avg_live_views = await _scrape_tab_with_timeout(page, live_url, handle, "live")
-            channel_data["avg_live_views"] = avg_live_views
+                # Shorts tab (Rule C/D)
+                shorts_url = ch_url.rstrip("/") + "/shorts"
+                avg_short_views = await _scrape_tab_with_timeout(page, shorts_url, handle, "shorts")
+                channel_data["avg_short_views"] = avg_short_views
+
+                await asyncio.sleep(_rand_delay(5, 10))
+
+                # Live tab (Rule C/D)
+                live_url = ch_url.rstrip("/") + "/streams"
+                avg_live_views = await _scrape_tab_with_timeout(page, live_url, handle, "live")
+                channel_data["avg_live_views"] = avg_live_views
 
             channel_data["score"] = _score_channel(
                 channel_data.get("subs"),
@@ -875,7 +912,10 @@ async def scrape_channels(
                 None,
                 location_badge,
             )
-            channel_data["url"] = ch_url
+            channel_data["url"] = ch_canonical_url
+            channel_data["channel_url"] = ch_canonical_url
+            channel_data["handle"] = handle_bare
+            channel_data["uc_id"] = uc_id
 
             _days_map = {'30': 'videos_30d', '60': 'videos_60d', '90': 'videos_90d', 'any': 'videos_30d'}
             channel_data['upload_frequency'] = channel_data.get(_days_map.get(activity_filter, 'videos_30d')) or '—'

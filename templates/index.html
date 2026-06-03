@@ -521,8 +521,7 @@
       const fmtFreq = v => (v === null || v === undefined || v === '—') ? '<span class="dash">—</span>' : v.toString();
       row.innerHTML = `
         <td class="channel-name">
-          <a href="${r.url}" target="_blank" rel="noopener">${r.name || r.url}</a>
-          <div class="sub-url">${(r.url || '').replace('https://www.youtube.com', '')}</div>
+          <a href="${r.channel_url || r.url}" target="_blank" rel="noopener">${r.name || r.handle || r.url}</a>
         </td>
         <td>${fmtNum(r.subs)}</td>
         <td>${locationBadge(r)}</td>

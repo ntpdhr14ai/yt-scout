@@ -6,6 +6,7 @@ import threading
 import time
 from flask import Flask, jsonify, render_template, request, Response
 
+import scraper
 from scraper import scrape_channels, MAX_CHANNELS_PER_BATCH, COOLDOWN_SECONDS, discovery_queue
 
 app = Flask(__name__)
@@ -116,6 +117,7 @@ def _run_scrape(keyword, region, min_subs, max_subs, batch_size, target_category
             _state["error"] = str(exc)
             _state["message"] = f"Error: {exc}"
     finally:
+        scraper.stop_requested = False
         with _state_lock:
             _state["running"] = False
             _state["auto_batch"] = False
@@ -171,11 +173,12 @@ def start():
 
 @app.route("/stop", methods=["POST"])
 def stop():
+    scraper.stop_requested = True
     _stop_event.set()
     with _state_lock:
         _state["stop_requested"] = True
         _state["message"] = "Stop requested — finishing current channel…"
-    return jsonify({"ok": True})
+    return jsonify({"status": "stop requested"})
 
 
 @app.route("/status")
@@ -248,7 +251,7 @@ def _flatten_row(r: dict) -> dict:
     contact_parts = list(r.get("emails") or []) + list(r.get("links") or [])
     return {
         "Channel": _fmt(r.get("name")),
-        "Handle": _fmt(r.get("url")),
+        "Handle": _fmt(r.get("handle")),
         "Subscribers": _fmt(r.get("subs")),
         "Location": _fmt(r.get("location_badge")),
         "Upload Frequency": _fmt(r.get("upload_frequency")),
