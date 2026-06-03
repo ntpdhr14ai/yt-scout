@@ -2,6 +2,8 @@ __pycache__/
 *.pyc
 *.pyo
 *.png
+*.xlsx
+*.csv
 thread.log
 flask_out.txt
 debug_search.png
