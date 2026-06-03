@@ -353,17 +353,6 @@
       <label>Batch Size (max {{ max_batch }})</label>
       <input type="number" id="batchSize" value="5" min="1" max="{{ max_batch }}" />
     </div>
-    <div class="form-group">
-      <label>Videos/Month Range</label>
-      <select id="vpmRange">
-        <option value="any" selected>Any</option>
-        <option value="0-10">0 – 10</option>
-        <option value="11-20">11 – 20</option>
-        <option value="21-30">21 – 30</option>
-        <option value="31-40">31 – 40</option>
-        <option value="50plus">50+</option>
-      </select>
-    </div>
     <div class="form-group wide">
       <label>Target Category (Optional)</label>
       <select id="targetCategory">
@@ -428,7 +417,9 @@
             <th>Channel</th>
             <th>Subscribers</th>
             <th>Location</th>
-            <th>Videos/mo</th>
+            <th>30d</th>
+            <th>60d</th>
+            <th>90d</th>
             <th>Score</th>
             <th>Category</th>
             <th>Avg Views<br><small>Videos</small></th>
@@ -521,6 +512,7 @@
       const category = r.category || '<span class="dash">—</span>';
 
       const row = document.createElement('tr');
+      const fmtCount = v => (v === null || v === undefined) ? '<span class="dash">—</span>' : v.toString();
       row.innerHTML = `
         <td class="channel-name">
           <a href="${r.url}" target="_blank" rel="noopener">${r.name || r.url}</a>
@@ -528,7 +520,9 @@
         </td>
         <td>${fmtNum(r.subs)}</td>
         <td>${locationBadge(r)}</td>
-        <td>${fmtNum(r.upload_freq)}</td>
+        <td>${fmtCount(r.videos_30d)}</td>
+        <td>${fmtCount(r.videos_60d)}</td>
+        <td>${fmtCount(r.videos_90d)}</td>
         <td>
           <div class="score-bar">
             <span class="score-num" style="color:${scoreColor(score)}">${score}</span>
@@ -649,7 +643,6 @@
       min_subs:        parseInt(document.getElementById('minSubs').value) || 1000,
       max_subs:        parseInt(document.getElementById('maxSubs').value) || 500000,
       batch_size:      batchSize,
-      vpm_filter:      document.getElementById('vpmRange').value,
       target_category: document.getElementById('targetCategory').value.trim(),
     };
 

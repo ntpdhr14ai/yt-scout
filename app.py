@@ -29,8 +29,8 @@ _state_lock = threading.Lock()
 _stop_event = threading.Event()
 
 _CSV_FIELDS = [
-    "name", "url", "subscribers", "location_badge", "category", "upload_freq",
-    "score", "country", "avg_video_views", "avg_short_views",
+    "name", "url", "subscribers", "location_badge", "videos_30d", "videos_60d", "videos_90d",
+    "score", "category", "avg_video_views", "avg_short_views",
     "avg_live_views", "emails", "links",
 ]
 
@@ -46,7 +46,7 @@ def _progress_cb(done, total, msg):
         _state["message"] = msg
 
 
-def _run_scrape(keyword, region, min_subs, max_subs, batch_size, vpm_filter, target_category):
+def _run_scrape(keyword, region, min_subs, max_subs, batch_size, target_category):
     _stop_event.clear()
     with _state_lock:
         _state["error"] = None
@@ -82,7 +82,6 @@ def _run_scrape(keyword, region, min_subs, max_subs, batch_size, vpm_filter, tar
                     _progress_cb,
                     seen_handles=seen_handles,
                     scroll_passes=scroll_passes,
-                    vpm_filter=vpm_filter,
                     target_category=target_category,
                 )
             )
@@ -154,12 +153,11 @@ def start():
     min_subs = max(0, int(data.get("min_subs", 1000)))
     max_subs = max(min_subs, int(data.get("max_subs", 10_000_000)))
     batch_size = min(int(data.get("batch_size", 5)), MAX_CHANNELS_PER_BATCH)
-    vpm_filter = data.get("vpm_filter", "any")
     target_category = (data.get("target_category") or "").strip()
 
     t = threading.Thread(
         target=_run_scrape,
-        args=(keyword, region, min_subs, max_subs, batch_size, vpm_filter, target_category),
+        args=(keyword, region, min_subs, max_subs, batch_size, target_category),
         daemon=True,
     )
     t.start()
@@ -246,10 +244,11 @@ def _flatten_row(r: dict) -> dict:
         "url": _fmt(r.get("url")),
         "subscribers": _fmt(r.get("subs")),
         "location_badge": _fmt(r.get("location_badge")),
-        "category": _fmt(r.get("category")),
-        "upload_freq": _fmt(r.get("upload_freq")),
+        "videos_30d": _fmt(r.get("videos_30d")),
+        "videos_60d": _fmt(r.get("videos_60d")),
+        "videos_90d": _fmt(r.get("videos_90d")),
         "score": _fmt(r.get("score")),
-        "country": _fmt(r.get("country")),
+        "category": _fmt(r.get("category")),
         "avg_video_views": _fmt(r.get("avg_video_views")),
         "avg_short_views": _fmt(r.get("avg_short_views")),
         "avg_live_views": _fmt(r.get("avg_live_views")),

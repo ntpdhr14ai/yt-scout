@@ -67,10 +67,6 @@ _TIME_WORDS = {
     "วัน", "เดือน", "ปี", "ชั่วโมง", "สัปดาห์", "ที่แล้ว", "ผ่านมา",
 }
 
-_VPM_RANGES = {
-    '0-10': (0, 10), '11-20': (11, 20), '21-30': (21, 30),
-    '31-40': (31, 40), '50plus': (50, 99999),
-}
 
 # ---------------------------------------------------------------------------
 # Logging helpers
@@ -141,16 +137,33 @@ def _months_ago(text: str) -> float | None:
     d = _days_ago(text)
     return d / 30 if d is not None else None
 
-def _calc_upload_frequency(timestamps: list[str]) -> float | None:
-    if len(timestamps) < 2:
-        return None
-    months = [v for t in timestamps if (v := _months_ago(t)) is not None]
-    if len(months) < 2:
-        return None
-    span = max(months) - min(months)
-    if span <= 0:
-        return None
-    return round(len(months) / max(span, 0.5), 2)
+def parse_recency(text: str) -> int | None:
+    t = text.lower()
+    if 'hour' in t or 'minute' in t or 'just now' in t:
+        return 0
+    if 'day' in t:
+        n = int(''.join(c for c in t if c.isdigit()) or 1)
+        return n
+    if 'week' in t:
+        n = int(''.join(c for c in t if c.isdigit()) or 1)
+        return n * 7
+    if 'month' in t:
+        n = int(''.join(c for c in t if c.isdigit()) or 1)
+        return n * 30
+    if 'year' in t:
+        return 999
+    if 'วัน' in t:
+        n = int(''.join(c for c in t if c.isdigit()) or 1)
+        return n
+    if 'สัปดาห์' in t:
+        n = int(''.join(c for c in t if c.isdigit()) or 1)
+        return n * 7
+    if 'เดือน' in t:
+        n = int(''.join(c for c in t if c.isdigit()) or 1)
+        return n * 30
+    if 'ปี' in t:
+        return 999
+    return None
 
 def _name_should_drop(name: str, handle: str) -> bool:
     combined = (name + " " + handle).lower()
@@ -484,6 +497,12 @@ async def _scrape_tab_views(page, url, handle, tab_name):
             _log_start(f"{tab_name} views (attempt {attempt})", handle)
             await page.goto(url, wait_until='domcontentloaded', timeout=30000)
             await page.wait_for_load_state('networkidle', timeout=30000)
+            if tab_name == "shorts" and "/shorts" not in page.url:
+                print(f"[scraper] EMPTY: shorts tab redirected → {handle}")
+                return None
+            if tab_name == "live" and "/streams" not in page.url:
+                print(f"[scraper] EMPTY: live tab redirected → {handle}")
+                return None
             await asyncio.sleep(random.uniform(3, 5))
             await page.evaluate('window.scrollBy(0, 1400)')
             await asyncio.sleep(2)
@@ -562,7 +581,6 @@ async def scrape_channels(
     progress_callback=None,
     seen_handles: set | None = None,
     scroll_passes: int = 0,
-    vpm_filter: str = 'any',
     target_category: str = '',
 ) -> list[dict]:
     if seen_handles is None:
@@ -713,24 +731,70 @@ async def scrape_channels(
             avg_video_views = await _scrape_tab_with_timeout(page, videos_url, handle, "videos")
             channel_data["avg_video_views"] = avg_video_views
 
-            # Category extraction — from videos tab page after load
+            # 30/60/90d recency counters — from already-loaded videos page
+            videos_30d = videos_60d = videos_90d = None
+            try:
+                date_texts = []
+                for sel in ['span.inline-metadata-item', '#metadata-line span']:
+                    candidates = await page.query_selector_all(sel)
+                    for el in candidates:
+                        try:
+                            txt = (await el.inner_text()).strip()
+                            if _is_timestamp_text(txt):
+                                date_texts.append(txt)
+                        except Exception:
+                            pass
+                    if date_texts:
+                        break
+                if date_texts:
+                    v30 = v60 = v90 = 0
+                    for txt in date_texts[:20]:
+                        days = parse_recency(txt)
+                        if days is not None:
+                            if days <= 30:
+                                v30 += 1
+                            if days <= 60:
+                                v60 += 1
+                            if days <= 90:
+                                v90 += 1
+                    videos_30d, videos_60d, videos_90d = v30, v60, v90
+                _log_ok("videos_30/60/90d", f"{videos_30d}/{videos_60d}/{videos_90d}", handle)
+            except Exception as e:
+                _log_failed("videos_30/60/90d", handle, e)
+            channel_data["videos_30d"] = videos_30d
+            channel_data["videos_60d"] = videos_60d
+            channel_data["videos_90d"] = videos_90d
+
+            # Category extraction — navigate to first video page
             category = None
             try:
-                el = await page.query_selector('meta[itemprop="genre"]')
-                if el:
-                    category = await el.get_attribute('content')
-            except Exception:
-                pass
-            if not category:
-                try:
-                    category = await page.evaluate(
-                        '() => { try { return ytInitialPlayerResponse.microformat.playerMicroformatRenderer.category } catch(e) { return null } }'
-                    )
-                except Exception:
-                    pass
+                first_video_href = None
+                for v_sel in ['a#video-title-link', 'ytd-rich-item-renderer a#thumbnail', 'a[href*="/watch?v="]']:
+                    el = await page.query_selector(v_sel)
+                    if el:
+                        href = await el.get_attribute('href')
+                        if href and '/watch' in href:
+                            first_video_href = href
+                            break
+                if first_video_href:
+                    if first_video_href.startswith('/'):
+                        first_video_href = f'https://www.youtube.com{first_video_href}'
+                    await page.goto(first_video_href, wait_until='networkidle', timeout=30000)
+                    el = await page.query_selector('meta[itemprop="genre"]')
+                    if el:
+                        category = await el.get_attribute('content')
+                    if not category:
+                        el = await page.query_selector('meta[property="og:video:tag"]')
+                        if el:
+                            category = await el.get_attribute('content')
+                    _log_ok("category", category, handle)
+                    await asyncio.sleep(random.uniform(3, 5))
+                    await page.goto(videos_url, wait_until='domcontentloaded', timeout=20000)
+                else:
+                    _log_failed("category", handle, "no first video link found")
+            except Exception as e:
+                _log_failed("category", handle, e)
             channel_data["category"] = category or ""
-            if category:
-                _log_ok("category", category, handle)
 
             # Category filter (Rule A) — only skip if category extracted AND doesn't match
             if target_category:
@@ -739,37 +803,6 @@ async def scrape_channels(
                     print(f"[scraper] PENDING: category unextractable → {handle}, continuing")
                 elif target_category.lower() not in category.lower():
                     print(f"[scraper] SKIPPED: {handle} — category '{category}' does not match target '{target_category}'")
-                    await asyncio.sleep(_rand_delay(2, 5))
-                    continue
-
-            # Timestamps for upload_freq — from already-loaded videos page
-            timestamps = []
-            try:
-                els = await page.query_selector_all('ytd-rich-item-renderer span')
-                for el in els:
-                    try:
-                        txt = (await el.inner_text()).strip()
-                        if _is_timestamp_text(txt):
-                            timestamps.append(txt)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-            if len(timestamps) >= 2:
-                channel_data["upload_freq"] = _calc_upload_frequency(timestamps)
-                _log_ok("upload_freq", channel_data["upload_freq"], handle)
-            else:
-                channel_data["upload_freq"] = None
-
-            # VPM filter (Rule B) — only skip if upload_freq is a real extracted number
-            upload_freq_val = channel_data.get("upload_freq")
-            if upload_freq_val is None:
-                channel_data["upload_freq"] = "Pending Check"
-                print(f'[scraper] PENDING: videos/month unextractable → {handle}, continuing')
-            elif vpm_filter != 'any' and isinstance(upload_freq_val, (int, float)):
-                lo, hi = _VPM_RANGES[vpm_filter]
-                if not (lo <= upload_freq_val <= hi):
-                    print(f'[scraper] SKIPPED: {handle} — videos/month {upload_freq_val} outside {vpm_filter}')
                     await asyncio.sleep(_rand_delay(2, 5))
                     continue
 
@@ -791,7 +824,7 @@ async def scrape_channels(
                 channel_data.get("subs"),
                 channel_data.get("avg_video_views"),
                 channel_data.get("avg_short_views"),
-                channel_data.get("upload_freq"),
+                None,
                 location_badge,
             )
             channel_data["url"] = ch_url
