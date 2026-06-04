@@ -20,35 +20,6 @@ processed_handles: set = set()
 discovery_queue: deque = deque()
 stop_requested: bool = False
 
-# ---------------------------------------------------------------------------
-# Stage 1 — name-based drop keywords
-# ---------------------------------------------------------------------------
-_NAME_DROP_KEYWORDS = [
-    "global", "north america", "south america", "latin",
-    "brazil", "brasil", "india", "vietnam", "viet",
-    "indonesia", "malaysia", "philippines", "esports official",
-    "singapore", "europe", "middle east", "africa", "japan", "korea",
-]
-
-# ---------------------------------------------------------------------------
-# Stage 2 — country data
-# ---------------------------------------------------------------------------
-_NON_THAI_COUNTRIES = {
-    "brazil", "india", "vietnam", "indonesia", "philippines",
-    "united states", "united kingdom", "malaysia", "singapore",
-    "japan", "south korea", "north korea", "korea", "china",
-    "australia", "germany", "france", "canada", "russia",
-    "mexico", "spain", "italy", "netherlands", "turkey", "egypt",
-    "nigeria", "pakistan", "bangladesh", "myanmar", "cambodia",
-    "laos", "taiwan", "hong kong", "new zealand", "argentina",
-    "colombia", "chile", "ukraine", "poland", "portugal", "greece",
-    "us", "gb", "jp", "kr", "cn", "au", "de", "fr", "ca", "ru",
-    "br", "in", "vn", "id", "ph", "my", "sg", "mx", "es", "it",
-    "nl", "tr", "eg", "ng", "pk", "mm", "kh", "la", "tw", "hk",
-    "nz", "ar", "co", "cl", "ua", "pl", "pt", "gr", "uk",
-}
-
-_NON_THAI_LONG = frozenset(n for n in _NON_THAI_COUNTRIES if len(n) > 2)
 
 _COUNTRY_RE = re.compile(
     r"^[A-Z]{2}$|Thailand|United States|United Kingdom|Japan|South Korea|"
@@ -97,6 +68,13 @@ def _rand_delay(lo: float = 5, hi: float = 15) -> float:
 
 def _has_thai_script(text: str) -> bool:
     return bool(re.search(r"[฀-๿]", text or ""))
+
+def is_thailand_channel(declared_country, text_blob):
+    if declared_country and 'thailand' in declared_country.lower():
+        return True
+    if text_blob and re.search(r'[฀-๿]', text_blob):
+        return True
+    return False
 
 def _parse_sub_count(text: str) -> int | None:
     if not text:
@@ -152,21 +130,6 @@ def parse_recency(text: str) -> int:
     if any(w in t for w in ['year','ปี']): return 999
     return 999
 
-def _name_should_drop(name: str, handle: str) -> bool:
-    combined = (name + " " + handle).lower()
-    return any(kw in combined for kw in _NAME_DROP_KEYWORDS)
-
-def _is_non_thai_country(country: str) -> bool:
-    if not country:
-        return False
-    c = country.strip().lower()
-    if c in ("th", "thailand"):
-        return False
-    if c in _NON_THAI_COUNTRIES:
-        return True
-    if len(c) == 2 and c.isalpha():
-        return True
-    return any(n in c for n in _NON_THAI_LONG)
 
 def _is_timestamp_text(txt: str) -> bool:
     t = txt.lower()
@@ -311,7 +274,7 @@ async def _scrape_subs(page, ch_url: str, handle: str) -> int | None:
 # About tab
 # ---------------------------------------------------------------------------
 
-async def _scrape_about(page, ch_url: str, handle: str) -> tuple[dict, bool, str]:
+async def _scrape_about(page, ch_url: str, handle: str, region: str = '') -> tuple[dict, bool, str]:
     data: dict = {}
     about_url = ch_url.rstrip("/") + "/about"
     _log_start("_scrape_about", handle)
@@ -398,33 +361,19 @@ async def _scrape_about(page, ch_url: str, handle: str) -> tuple[dict, bool, str
                 _log_failed("country (selector)", handle, e)
         data["country"] = country
 
-        body_lower = body_text.lower()
-        confirmed_th = (
-            "thailand" in body_lower
-            or "ไทย" in body_text
-            or country.strip().lower() in ("th", "thailand")
-        )
-        has_thai = _has_thai_script(body_text)
-        is_non_thai = _is_non_thai_country(country) if country else False
-
-        if confirmed_th:
-            location_badge = "TH"
+        is_th = is_thailand_channel(country, body_text)
+        if is_th:
+            location_badge = 'TH' if (country.strip().lower() in ('th', 'thailand') or 'thailand' in body_text.lower()) else 'TH inferred'
             keep = True
-            _log_ok("location", "confirmed TH", handle)
-        elif has_thai:
-            location_badge = "TH inferred"
-            keep = True
-            _log_ok("location", "TH inferred (Thai script detected)", handle)
-        elif is_non_thai:
-            _log_dropped(handle, f"declared non-Thai country: {country}")
-            keep = False
-            location_badge = "?"
+            _log_ok("location", location_badge, handle)
         else:
-            # Rule E: empty page or no TH evidence is not a confirmed non-Thai — keep with ?
-            location_badge = "?"
-            keep = True
-            reason = "about page empty" if not body_text.strip() else "no TH evidence but not confirmed non-Thai"
-            _log_ok("location", f"? ({reason})", handle)
+            location_badge = '?'
+            if region == 'TH':
+                _log_dropped(handle, 'not Thailand channel')
+                keep = False
+            else:
+                keep = True
+                _log_ok("location", "? (not TH, kept)", handle)
 
         if not keep:
             data.setdefault("emails", [])
@@ -483,13 +432,11 @@ async def _scrape_tab_views(page, url, handle, tab_name):
         try:
             _log_start(f"{tab_name} views (attempt {attempt})", handle)
             await page.goto(url, wait_until='domcontentloaded', timeout=30000)
+            if tab_name == 'shorts' and '/shorts' not in page.url:
+                return None
+            if tab_name == 'live' and '/streams' not in page.url:
+                return None
             await page.wait_for_load_state('networkidle', timeout=30000)
-            if tab_name == "shorts" and "/shorts" not in page.url:
-                print(f"[scraper] EMPTY: shorts tab redirected → {handle}")
-                return None
-            if tab_name == "live" and "/streams" not in page.url:
-                print(f"[scraper] EMPTY: live tab redirected → {handle}")
-                return None
             try:
                 await page.wait_for_selector(
                     'ytd-rich-item-renderer, ytd-grid-video-renderer', timeout=8000
@@ -720,36 +667,20 @@ async def scrape_channels(
             if progress_callback:
                 progress_callback(idx, len(channel_links), f"Checking {handle}")
 
-            if _name_should_drop("", handle):
-                _log_dropped(handle, "handle matches Stage-1 keyword")
-                await asyncio.sleep(_rand_delay(1, 3))
-                continue
-
             await page.goto(ch_url, wait_until="domcontentloaded")
             await asyncio.sleep(random.uniform(3, 5))
 
             ch_canonical_url = ch_url  # resolved after _scrape_about below
 
-            try:
-                early_title = await page.title()
-                if early_title and _YOUTUBE_TITLE_SUFFIX in early_title:
-                    early_name = early_title.replace(_YOUTUBE_TITLE_SUFFIX, "").strip()
-                    if _name_should_drop(early_name, handle):
-                        _log_dropped(handle, f"name '{early_name}' matches Stage-1 keyword")
-                        await asyncio.sleep(_rand_delay(1, 3))
-                        continue
-            except Exception:
-                pass
-
             subs = await _scrape_subs(page, ch_url, handle)
             if subs is None:
-                print(f'[scraper] SKIPPED: {handle} — could not parse subscriber count')
+                print(f'[scraper] SKIP: {handle} — unparseable subscriber count')
                 continue
             if not (min_subs <= subs <= max_subs):
                 print(f'[scraper] SKIPPED: {handle} — subs {subs} outside range {min_subs}-{max_subs}')
                 continue
 
-            channel_data, keep, location_badge = await _scrape_about(page, ch_url, handle)
+            channel_data, keep, location_badge = await _scrape_about(page, ch_url, handle, region)
 
             # Extract UC ID from /about page source (page is reliably on /about after _scrape_about)
             uc_id = None
@@ -773,12 +704,6 @@ async def scrape_channels(
             ch_canonical_url = f'https://www.youtube.com/channel/{uc_id}' if uc_id else ch_url
 
             if not keep:
-                await asyncio.sleep(_rand_delay(2, 5))
-                continue
-
-            full_name = channel_data.get("name", "")
-            if _name_should_drop(full_name, handle):
-                _log_dropped(handle, f"name '{full_name}' matches Stage-1 keyword (post-about)")
                 await asyncio.sleep(_rand_delay(2, 5))
                 continue
 
