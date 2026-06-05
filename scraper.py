@@ -135,6 +135,34 @@ def _is_timestamp_text(txt: str) -> bool:
     t = txt.lower()
     return any(w in t for w in _TIME_WORDS)
 
+def keyword_match(keyword: str, channel_name: str, about_text: str, recent_titles: list[str]) -> bool:
+    if not keyword:
+        return True
+    kw = keyword.lower()
+    haystack = " ".join(filter(None, [channel_name, about_text] + list(recent_titles)))
+    return kw in haystack.lower()
+
+def gate_subscribers(subs: int | None, min_subs: int, max_subs: int) -> tuple[bool, str]:
+    if subs is None:
+        return False, "unparseable subscriber count"
+    if not (min_subs <= subs <= max_subs):
+        return False, f"subs {subs} outside range {min_subs}-{max_subs}"
+    return True, ""
+
+def gate_location(keep: bool) -> tuple[bool, str]:
+    if not keep:
+        return False, "not Thailand channel"
+    return True, ""
+
+def gate_recency(activity_filter: str, videos_30d: int, videos_60d: int, videos_90d: int) -> tuple[bool, str]:
+    if activity_filter == 'any':
+        return True, ""
+    count_map = {'30': videos_30d, '60': videos_60d, '90': videos_90d}
+    count = count_map.get(activity_filter) or 0
+    if count < 2:
+        return False, f"only {count} upload(s) in last {int(activity_filter)}d, minimum is 2"
+    return True, ""
+
 def _score_channel(
     subs,
     avg_video_views: int | None,
@@ -673,11 +701,9 @@ async def scrape_channels(
             ch_canonical_url = ch_url  # resolved after _scrape_about below
 
             subs = await _scrape_subs(page, ch_url, handle)
-            if subs is None:
-                print(f'[scraper] SKIP: {handle} — unparseable subscriber count')
-                continue
-            if not (min_subs <= subs <= max_subs):
-                print(f'[scraper] SKIPPED: {handle} — subs {subs} outside range {min_subs}-{max_subs}')
+            passed, reason = gate_subscribers(subs, min_subs, max_subs)
+            if not passed:
+                print(f'[scraper] SKIPPED: {handle} — {reason}')
                 continue
 
             channel_data, keep, location_badge = await _scrape_about(page, ch_url, handle, region)
@@ -703,7 +729,8 @@ async def scrape_channels(
             _log_ok("uc_id", uc_id, handle)
             ch_canonical_url = f'https://www.youtube.com/channel/{uc_id}' if uc_id else ch_url
 
-            if not keep:
+            passed, reason = gate_location(keep)
+            if not passed:
                 await asyncio.sleep(_rand_delay(2, 5))
                 continue
 
@@ -731,6 +758,23 @@ async def scrape_channels(
                     await page.evaluate('window.scrollBy(0, 600)')
                     await asyncio.sleep(1.5)
                 await asyncio.sleep(2)
+                recent_titles = []
+                try:
+                    title_els = await page.query_selector_all('yt-formatted-string#video-title')
+                    for el in title_els[:8]:
+                        try:
+                            txt = (await el.inner_text()).strip()
+                            if txt:
+                                recent_titles.append(txt)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                if not keyword_match(keyword, channel_data.get("name", ""), "", recent_titles):
+                    _log_dropped(handle, "keyword not found in channel name or recent video titles")
+                    processed_handles.add(handle_bare)
+                    await asyncio.sleep(_rand_delay(2, 5))
+                    continue
                 date_texts = []
                 # Primary: parse ytd-rich-item-renderer inner text line by line
                 rich_els = await page.query_selector_all('ytd-rich-item-renderer')
@@ -778,15 +822,12 @@ async def scrape_channels(
             channel_data["videos_90d"] = videos_90d
 
             # Activity gate — hard exit before Shorts/Live scraping
-            if activity_filter != 'any':
-                days = int(activity_filter)
-                count_map = {'30': videos_30d, '60': videos_60d, '90': videos_90d}
-                count = count_map.get(activity_filter) or 0
-                if count < 2:
-                    print(f'[scraper] SKIPPED: {handle} — only {count} upload(s) in last {days}d, minimum is 2')
-                    processed_handles.add(handle_bare)
-                    await asyncio.sleep(_rand_delay(2, 5))
-                    continue
+            passed, reason = gate_recency(activity_filter, videos_30d, videos_60d, videos_90d)
+            if not passed:
+                print(f'[scraper] SKIPPED: {handle} — {reason}')
+                processed_handles.add(handle_bare)
+                await asyncio.sleep(_rand_delay(2, 5))
+                continue
 
             skip_tabs = (videos_30d == 0 and videos_60d == 0 and videos_90d == 0)
             if skip_tabs:
