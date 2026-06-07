@@ -343,11 +343,6 @@
       <label>Search Keyword</label>
       <input type="text" id="keyword" placeholder="e.g. travel vlog Thailand" />
     </div>
-    <div class="form-group wide">
-      <label>Seed Channel <small style="text-transform:none;font-weight:400;letter-spacing:0;">(if no keyword)</small></label>
-      <input type="text" id="seedChannel" placeholder="@channelhandle" />
-      <small style="color:var(--muted);font-size:0.75rem;margin-top:4px;display:block;">Optional. Used when keyword is empty to seed discovery from a known channel.</small>
-    </div>
     <div class="form-group">
       <label>Region</label>
       <select id="region">
@@ -675,8 +670,7 @@
 
   async function startScrape() {
     const keyword = document.getElementById('keyword').value.trim();
-    const seedChannel = document.getElementById('seedChannel').value.trim();
-    if (!keyword && !seedChannel) { alert('Please provide either a keyword or a seed channel handle.'); return; }
+    if (!keyword) { alert('Please provide a keyword.'); return; }
 
     const batchSize = Math.min(parseInt(document.getElementById('batchSize').value) || 5, MAX_BATCH);
     document.getElementById('batchSize').value = batchSize;
@@ -688,7 +682,6 @@
 
     const payload = {
       keyword,
-      seed_channel:    seedChannel,
       region:          document.getElementById('region').value,
       min_subs:        parseInt(document.getElementById('minSubs').value) || 1000,
       max_subs:        parseInt(document.getElementById('maxSubs').value) || 500000,

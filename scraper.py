@@ -531,56 +531,6 @@ async def _scrape_tab_with_timeout(page, url, handle, tab_name):
         return None
 
 # ---------------------------------------------------------------------------
-# Channels tab discovery
-# ---------------------------------------------------------------------------
-
-async def discover_from_channels_tab(page, handle):
-    try:
-        url = f'https://www.youtube.com/@{handle}/channels'
-        print(f'[scraper] SEED: visiting {url}')
-        await page.goto(url, wait_until='domcontentloaded', timeout=30000)
-        await page.wait_for_load_state('networkidle', timeout=20000)
-        await asyncio.sleep(random.uniform(2, 4))
-
-        body_text = await page.inner_text('body')
-        if any(phrase in body_text.lower() for phrase in [
-            'this channel has no', 'no channels', 'ไม่มีช่อง'
-        ]):
-            print(f'[scraper] SEED EMPTY: @{handle} has no public channels tab')
-            return []
-
-        selectors = ['a#channel-name', 'a.channel-link', 'ytd-channel-renderer a', '#channel-info a']
-        links = []
-        for sel in selectors:
-            links = await page.query_selector_all(sel)
-            if links:
-                break
-
-        if not links:
-            print(f'[scraper] SEED EMPTY: no channel links found on @{handle}/channels')
-            return []
-
-        new_handles = []
-        for link in links:
-            try:
-                href = await link.get_attribute('href')
-                if href and '/@' in href:
-                    h = href.split('/@')[-1].split('/')[0].strip()
-                    if h and h not in processed_handles and h not in discovery_queue:
-                        new_handles.append(h)
-                        discovery_queue.append(h)
-            except Exception as e:
-                print(f'[scraper] SEED LINK ERROR: {e}')
-                continue
-
-        print(f'[scraper] SEED: found {len(new_handles)} new handles from @{handle}')
-        return new_handles
-
-    except Exception as e:
-        print(f'[scraper] SEED FAILED: @{handle} — {e}')
-        return []
-
-# ---------------------------------------------------------------------------
 # Core scraper
 # ---------------------------------------------------------------------------
 
@@ -595,7 +545,6 @@ async def scrape_channels(
     scroll_passes: int = 0,
     target_category: str = '',
     activity_filter: str = 'any',
-    seed_channel: str = '',
 ) -> list[dict]:
     if seen_handles is None:
         seen_handles = set()
@@ -623,61 +572,65 @@ async def scrape_channels(
         page = await context.new_page()
         await _stealth.apply_stealth_async(page)
 
-        # Search or seed mode
+        # Search
         channel_links: list[str] = []
-        if seed_channel and not keyword:
-            print(f"[scraper] SEED MODE: starting from @{seed_channel} channels tab")
-            new_handles = await discover_from_channels_tab(page, seed_channel)
-            n = len(discovery_queue)
-            print(f"[scraper] SEED MODE: starting from @{seed_channel} channels tab — {n} handles queued")
-        else:
-            search_url = (
-                f"https://www.youtube.com/results?search_query={quote_plus(keyword)}"
-                f"&gl=TH&hl=th"
-            )
-            print(f"[scraper] Navigating to search: {search_url}")
-            await page.goto(search_url, wait_until="domcontentloaded")
-            await asyncio.sleep(_rand_delay(3, 6))
-            print(f"[scraper] Search page title: {await page.title()!r}")
+        search_url = (
+            f"https://www.youtube.com/results?search_query={quote_plus(keyword)}"
+            f"&gl=TH&hl=th"
+        )
+        print(f"[scraper] Navigating to search: {search_url}")
+        await page.goto(search_url, wait_until="domcontentloaded")
+        await asyncio.sleep(_rand_delay(3, 6))
+        print(f"[scraper] Search page title: {await page.title()!r}")
 
+        try:
+            accept_btn = page.locator("button", has_text="Accept all")
+            if await accept_btn.count() > 0:
+                await accept_btn.first.click()
+                await asyncio.sleep(2)
+                print("[scraper] Cookie dialog dismissed")
+        except Exception:
+            pass
+
+        for _ in range(scroll_passes):
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await asyncio.sleep(_rand_delay(2, 4))
+
+        for _ in range(3):
+            await page.evaluate('window.scrollBy(0, 800)')
+            await asyncio.sleep(random.uniform(1.5, 2.5))
+
+        print(f'[search] Extracting handles from page source...')
+        # Get all anchor tags from the page that contain /@
+        all_anchors = await page.query_selector_all('a[href*="/@"]')
+        raw_handles = []
+        seen = set()
+        for anchor in all_anchors:
             try:
-                accept_btn = page.locator("button", has_text="Accept all")
-                if await accept_btn.count() > 0:
-                    await accept_btn.first.click()
-                    await asyncio.sleep(2)
-                    print("[scraper] Cookie dialog dismissed")
+                href = await anchor.get_attribute('href')
+                if not href:
+                    continue
+                # Extract handle from href like /@handlename or /@handlename/videos
+                if '/@' not in href:
+                    continue
+                handle = href.split('/@')[1].split('/')[0].strip()
+                if not handle:
+                    continue
+                # Skip YouTube's own navigation links
+                if handle in ('', 'results', 'watch', 'shorts', 'feed', 'channel'):
+                    continue
+                if handle not in seen and handle not in processed_handles:
+                    seen.add(handle)
+                    raw_handles.append(handle)
             except Exception:
-                pass
+                continue
+        print(f'[search] Raw handles extracted: {len(raw_handles)} unique handles before filters')
+        print(f'[search] Handles: {raw_handles[:20]}')  # show first 20
+        handles = raw_handles[:batch_size * 5]
 
-            for _ in range(scroll_passes):
-                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                await asyncio.sleep(_rand_delay(2, 4))
-
-            for _ in range(3):
-                await page.evaluate('window.scrollBy(0, 800)')
-                await asyncio.sleep(random.uniform(1.5, 2.5))
-
-            # Extract channel handles from video result cards
-            # Each video card has a channel link in the metadata below the title
-            channel_links_raw = await page.query_selector_all(
-                'ytd-video-renderer #channel-name a, '
-                'ytd-video-renderer a.yt-formatted-string[href*="/@"]'
-            )
-            handles = []
-            seen = set()
-            for link in channel_links_raw:
-                href = await link.get_attribute('href')
-                if href and '/@' in href:
-                    h = href.split('/@')[-1].split('/')[0].strip()
-                    if h and h not in seen and h not in processed_handles:
-                        seen.add(h)
-                        handles.append(h)
-                if len(handles) >= batch_size * 5:  # fetch 5x batch to allow for filter dropouts
-                    break
-
-            channel_links = [f'/@{h}' for h in handles]
-            for link in channel_links:
-                seen_handles.add(link)
+        channel_links = [f'/@{h}' for h in handles]
+        for link in channel_links:
+            seen_handles.add(link)
 
         # Add discovery queue items from prior batches (Change 5)
         disc_added = []
@@ -698,6 +651,8 @@ async def scrape_channels(
 
             if progress_callback:
                 progress_callback(idx, len(channel_links), f"Checking {handle}")
+
+            print(f'[pipeline] Evaluating {handle} ({idx+1}/{len(channel_links)})')
 
             await page.goto(ch_url, wait_until="domcontentloaded")
             await asyncio.sleep(random.uniform(3, 5))
@@ -912,6 +867,7 @@ async def scrape_channels(
             channel_data['upload_frequency'] = channel_data.get(_days_map.get(activity_filter, 'videos_30d')) or '—'
 
             results.append(channel_data)
+            print(f'[pipeline] ADDED: {handle} — now {len(results)} in results')
 
             processed_handles.add(handle_bare)
             _log_ok("channel_complete", channel_data.get("name", handle), handle)
@@ -921,14 +877,6 @@ async def scrape_channels(
                     len(channel_links),
                     f"Done {channel_data.get('name', handle)}",
                 )
-
-            # Channel discovery — only when category filter matches
-            if target_category and channel_data.get("category"):
-                if target_category.lower() in channel_data["category"].lower():
-                    try:
-                        await discover_from_channels_tab(page, handle_bare)
-                    except Exception as e:
-                        _log_failed("channels_tab_discovery", handle, e)
 
             if idx < len(channel_links) - 1:
                 await asyncio.sleep(_rand_delay(10, 20))

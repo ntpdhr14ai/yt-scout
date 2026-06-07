@@ -48,7 +48,7 @@ def _progress_cb(done, total, msg):
         _state["message"] = msg
 
 
-def _run_scrape(keyword, region, min_subs, max_subs, batch_size, target_category, activity_filter, seed_channel=''):
+def _run_scrape(keyword, region, min_subs, max_subs, batch_size, target_category, activity_filter):
     _stop_event.clear()
     with _state_lock:
         _state["error"] = None
@@ -64,7 +64,6 @@ def _run_scrape(keyword, region, min_subs, max_subs, batch_size, target_category
 
     seen_handles: set = set()
     batch_num = 0
-    seed_exhausted = False
     _preserve_message = False
 
     try:
@@ -75,10 +74,6 @@ def _run_scrape(keyword, region, min_subs, max_subs, batch_size, target_category
             batch_num += 1
             scroll_passes = (batch_num - 1) * 3
 
-            in_seed_mode = bool(seed_channel) and not seed_exhausted
-            effective_seed = seed_channel if in_seed_mode else ''
-            effective_keyword = '' if in_seed_mode else keyword
-
             with _state_lock:
                 _state["running"] = True
                 _state["progress"] = 0
@@ -87,13 +82,12 @@ def _run_scrape(keyword, region, min_subs, max_subs, batch_size, target_category
 
             results = asyncio.run(
                 scrape_channels(
-                    effective_keyword, region, min_subs, max_subs, batch_size,
+                    keyword, region, min_subs, max_subs, batch_size,
                     _progress_cb,
                     seen_handles=seen_handles,
                     scroll_passes=scroll_passes,
                     target_category=target_category,
                     activity_filter=activity_filter,
-                    seed_channel=effective_seed,
                 )
             )
 
@@ -113,26 +107,8 @@ def _run_scrape(keyword, region, min_subs, max_subs, batch_size, target_category
                         + ("Checking discovery queue next…" if discovery_queue else "Stopping.")
                     )
 
-            # Fix 2 & 3: graceful handling of empty queue
             if not results and not discovery_queue:
-                if in_seed_mode and keyword:
-                    # Fix 3: fall back from seed to keyword search
-                    seed_exhausted = True
-                    with _state_lock:
-                        _state["message"] = f'Seed discovery complete — switching to keyword search for "{keyword}"'
-                    print(f'[scraper] QUEUE EMPTY: falling back to keyword search for "{keyword}"')
-                    if _stop_event.wait(timeout=COOLDOWN_SECONDS):
-                        break
-                    continue
-                elif in_seed_mode and batch_num == 1:
-                    # Fix 2: seed had no discoverable peers at all
-                    _preserve_message = True
-                    with _state_lock:
-                        _state["message"] = f'Seed channel @{seed_channel} has no discoverable peer channels. Try a different seed or use a keyword instead.'
-                    print(f'[scraper] STOPPED: empty seed queue')
-                    break
-                else:
-                    break
+                break
 
             if _stop_event.wait(timeout=COOLDOWN_SECONDS):
                 break
@@ -188,9 +164,8 @@ def start():
 
     data = request.json or {}
     keyword = (data.get("keyword") or "").strip()
-    seed_channel = (data.get("seed_channel") or "").strip().lstrip("@")
-    if not keyword and not seed_channel:
-        return jsonify({"error": "Please provide either a keyword or a seed channel handle."}), 400
+    if not keyword:
+        return jsonify({"error": "Please provide a keyword."}), 400
 
     region = data.get("region", "TH")
     min_subs = max(0, int(data.get("min_subs", 1000)))
@@ -203,7 +178,7 @@ def start():
 
     t = threading.Thread(
         target=_run_scrape_thread,
-        args=(keyword, region, min_subs, max_subs, batch_size, target_category, activity_filter, seed_channel),
+        args=(keyword, region, min_subs, max_subs, batch_size, target_category, activity_filter),
         daemon=True,
     )
     t.start()
