@@ -633,7 +633,7 @@ async def scrape_channels(
         else:
             search_url = (
                 f"https://www.youtube.com/results?search_query={quote_plus(keyword)}"
-                f"&sp=EgIQAg%253D%253D&gl={region}"
+                f"&gl={region}"
             )
             print(f"[scraper] Navigating to search: {search_url}")
             await page.goto(search_url, wait_until="domcontentloaded")
@@ -653,25 +653,28 @@ async def scrape_channels(
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 await asyncio.sleep(_rand_delay(2, 4))
 
-            attempts = 0
-            while len(channel_links) < batch_size and attempts < 8:
-                anchors = await page.locator("a#main-link.channel-link").all()
-                print(f"[scraper] Link collection attempt {attempts + 1}: {len(anchors)} anchors visible")
-                for a in anchors:
-                    href = await a.get_attribute("href")
-                    if (
-                        href
-                        and "/@" in href
-                        and href not in channel_links
-                        and href not in seen_handles
-                    ):
-                        channel_links.append(href)
-                if len(channel_links) < batch_size:
-                    await page.evaluate("window.scrollBy(0, 800)")
-                    await asyncio.sleep(_rand_delay(2, 4))
-                attempts += 1
+            # Extract channel handles from video result cards
+            # Each video card has a channel link in the metadata below the title
+            channel_links_raw = await page.query_selector_all(
+                'ytd-video-renderer #channel-name a, '
+                'ytd-video-renderer a.yt-formatted-string[href*="/@"]'
+            )
+            handles = []
+            seen = set()
+            for link in channel_links_raw:
+                href = await link.get_attribute('href')
+                if href and '/@' in href:
+                    h = href.split('/@')[-1].split('/')[0].strip()
+                    if h and h not in seen and h not in processed_handles:
+                        seen.add(h)
+                        handles.append(h)
+                if len(handles) >= batch_size * 3:  # fetch 3x batch to allow for filter dropouts
+                    break
 
-            channel_links = channel_links[:batch_size]
+            await page.evaluate('window.scrollBy(0, 800)')
+            await asyncio.sleep(random.uniform(2, 3))
+
+            channel_links = [f'/@{h}' for h in handles]
             for link in channel_links:
                 seen_handles.add(link)
 
