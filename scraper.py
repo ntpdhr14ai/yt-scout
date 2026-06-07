@@ -633,7 +633,7 @@ async def scrape_channels(
         else:
             search_url = (
                 f"https://www.youtube.com/results?search_query={quote_plus(keyword)}"
-                f"&gl={region}"
+                f"&gl=TH&hl=th"
             )
             print(f"[scraper] Navigating to search: {search_url}")
             await page.goto(search_url, wait_until="domcontentloaded")
@@ -653,6 +653,10 @@ async def scrape_channels(
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 await asyncio.sleep(_rand_delay(2, 4))
 
+            for _ in range(3):
+                await page.evaluate('window.scrollBy(0, 800)')
+                await asyncio.sleep(random.uniform(1.5, 2.5))
+
             # Extract channel handles from video result cards
             # Each video card has a channel link in the metadata below the title
             channel_links_raw = await page.query_selector_all(
@@ -668,11 +672,8 @@ async def scrape_channels(
                     if h and h not in seen and h not in processed_handles:
                         seen.add(h)
                         handles.append(h)
-                if len(handles) >= batch_size * 3:  # fetch 3x batch to allow for filter dropouts
+                if len(handles) >= batch_size * 5:  # fetch 5x batch to allow for filter dropouts
                     break
-
-            await page.evaluate('window.scrollBy(0, 800)')
-            await asyncio.sleep(random.uniform(2, 3))
 
             channel_links = [f'/@{h}' for h in handles]
             for link in channel_links:
