@@ -135,13 +135,6 @@ def _is_timestamp_text(txt: str) -> bool:
     t = txt.lower()
     return any(w in t for w in _TIME_WORDS)
 
-def keyword_match(keyword: str, channel_name: str, about_text: str, recent_titles: list[str]) -> bool:
-    if not keyword:
-        return True
-    kw = keyword.lower()
-    haystack = " ".join(filter(None, [channel_name, about_text] + list(recent_titles)))
-    return kw in haystack.lower()
-
 def gate_subscribers(subs: int | None, min_subs: int, max_subs: int) -> tuple[bool, str]:
     if subs is None:
         return False, "unparseable subscriber count"
@@ -150,18 +143,7 @@ def gate_subscribers(subs: int | None, min_subs: int, max_subs: int) -> tuple[bo
     return True, ""
 
 def gate_location(keep: bool) -> tuple[bool, str]:
-    if not keep:
-        return False, "not Thailand channel"
-    return True, ""
-
-def gate_recency(activity_filter: str, videos_30d: int, videos_60d: int, videos_90d: int) -> tuple[bool, str]:
-    if activity_filter == 'any':
-        return True, ""
-    count_map = {'30': videos_30d, '60': videos_60d, '90': videos_90d}
-    count = count_map.get(activity_filter) or 0
-    if count < 2:
-        return False, f"only {count} upload(s) in last {int(activity_filter)}d, minimum is 2"
-    return True, ""
+    return True, 'location check disabled — pending rewrite'
 
 def _score_channel(
     subs,
@@ -583,6 +565,16 @@ async def scrape_channels(
         await asyncio.sleep(_rand_delay(3, 6))
         print(f"[scraper] Search page title: {await page.title()!r}")
 
+        page_title = await page.title()
+        page_url = page.url
+        body_length = len(await page.inner_text('body'))
+        print(f'[diag] Page title: {page_title}')
+        print(f'[diag] Page URL: {page_url}')
+        print(f'[diag] Body text length: {body_length} chars')
+        screenshot_path = r'C:\Users\Passorn\OneDrive - Tourism Authority of Thailand\Desktop\TheChuckyWay\yt-scout\yt_search_debug.png'
+        await page.screenshot(path=screenshot_path)
+        print(f'[diag] Screenshot saved to {screenshot_path}')
+
         try:
             accept_btn = page.locator("button", has_text="Accept all")
             if await accept_btn.count() > 0:
@@ -626,6 +618,7 @@ async def scrape_channels(
                 continue
         print(f'[search] Raw handles extracted: {len(raw_handles)} unique handles before filters')
         print(f'[search] Handles: {raw_handles[:20]}')  # show first 20
+        print(f'[diag] Handles collected before filters: {len(raw_handles)} → {raw_handles[:15]}')
         handles = raw_handles[:batch_size * 5]
 
         channel_links = [f'/@{h}' for h in handles]
@@ -729,11 +722,6 @@ async def scrape_channels(
                             pass
                 except Exception:
                     pass
-                if not keyword_match(keyword, channel_data.get("name", ""), "", recent_titles):
-                    _log_dropped(handle, "keyword not found in channel name or recent video titles")
-                    processed_handles.add(handle_bare)
-                    await asyncio.sleep(_rand_delay(2, 5))
-                    continue
                 date_texts = []
                 # Primary: parse ytd-rich-item-renderer inner text line by line
                 rich_els = await page.query_selector_all('ytd-rich-item-renderer')
@@ -779,14 +767,6 @@ async def scrape_channels(
             channel_data["videos_30d"] = videos_30d
             channel_data["videos_60d"] = videos_60d
             channel_data["videos_90d"] = videos_90d
-
-            # Activity gate — hard exit before Shorts/Live scraping
-            passed, reason = gate_recency(activity_filter, videos_30d, videos_60d, videos_90d)
-            if not passed:
-                print(f'[scraper] SKIPPED: {handle} — {reason}')
-                processed_handles.add(handle_bare)
-                await asyncio.sleep(_rand_delay(2, 5))
-                continue
 
             skip_tabs = (videos_30d == 0 and videos_60d == 0 and videos_90d == 0)
             if skip_tabs:
