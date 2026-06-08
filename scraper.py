@@ -136,15 +136,38 @@ def _is_timestamp_text(txt: str) -> bool:
     t = txt.lower()
     return any(w in t for w in _TIME_WORDS)
 
-def gate_subscribers(subs: int | None, min_subs: int, max_subs: int) -> tuple[bool, str]:
-    if subs is None:
-        return False, "unparseable subscriber count"
-    if not (min_subs <= subs <= max_subs):
-        return False, f"subs {subs} outside range {min_subs}-{max_subs}"
-    return True, ""
+SUBSCRIBER_TIERS = {
+    'under_5k':     (0, 5000),
+    '5k_10k':       (5001, 10000),
+    '10k_100k':     (10001, 100000),
+    '100k_500k':    (100001, 500000),
+    '500k_1m':      (500001, 1000000),
+    'over_1m':      (1000001, 999999999),
+}
 
-def gate_location(keep: bool) -> tuple[bool, str]:
-    return True, 'location check disabled — pending rewrite'
+def gate_subscribers(channel, tier):
+    if not tier or tier == 'any':
+        return True, 'ok'
+    lo, hi = SUBSCRIBER_TIERS.get(tier, (0, 999999999))
+    subs = channel.get('subs')
+    if subs is None:
+        return False, 'unparseable subscriber count'
+    if not (lo <= subs <= hi):
+        return False, f'subs {subs:,} outside tier {tier} ({lo:,}–{hi:,})'
+    return True, 'ok'
+
+def gate_location(channel, region):
+    if region != 'TH':
+        return True, 'no region filter'
+    declared = (channel.get('declared_country') or '').lower()
+    about_text = (channel.get('about_text') or '')
+    name = (channel.get('name') or '')
+    blob = f'{declared} {about_text} {name}'
+    if 'thailand' in declared:
+        return True, 'declared country = Thailand'
+    if re.search(r'[฀-๿]', blob):
+        return True, 'Thai script detected'
+    return False, 'no Thailand signal found'
 
 def _score_channel(
     subs,
@@ -304,6 +327,7 @@ async def _scrape_about(page, ch_url: str, handle: str, region: str = '') -> tup
             _log_ok("body_text", f"{len(body_text)} chars", handle)
         except Exception as e:
             _log_failed("body_text", handle, e)
+        data["about_text"] = body_text
 
         name = ""
         try:
@@ -371,6 +395,7 @@ async def _scrape_about(page, ch_url: str, handle: str, region: str = '') -> tup
             except Exception as e:
                 _log_failed("country (selector)", handle, e)
         data["country"] = country
+        data["declared_country"] = country
 
         is_th = is_thailand_channel(country, body_text)
         if is_th:
@@ -520,8 +545,7 @@ async def _scrape_tab_with_timeout(page, url, handle, tab_name):
 async def scrape_channels(
     keyword: str,
     region: str,
-    min_subs: int,
-    max_subs: int,
+    sub_tier: str,
     batch_size: int,
     progress_callback=None,
     seen_handles: set | None = None,
@@ -664,7 +688,7 @@ async def scrape_channels(
             ch_canonical_url = ch_url  # resolved after _scrape_about below
 
             subs = await _scrape_subs(page, ch_url, handle)
-            passed, reason = gate_subscribers(subs, min_subs, max_subs)
+            passed, reason = gate_subscribers({'subs': subs}, sub_tier)
             if not passed:
                 print(f'[scraper] SKIPPED: {handle} — {reason}')
                 continue
@@ -692,7 +716,7 @@ async def scrape_channels(
             _log_ok("uc_id", uc_id, handle)
             ch_canonical_url = f'https://www.youtube.com/channel/{uc_id}' if uc_id else ch_url
 
-            passed, reason = gate_location(keep)
+            passed, reason = gate_location(channel_data, region)
             if not passed:
                 await asyncio.sleep(_rand_delay(2, 5))
                 continue

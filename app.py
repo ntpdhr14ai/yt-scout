@@ -48,7 +48,7 @@ def _progress_cb(done, total, msg):
         _state["message"] = msg
 
 
-def _run_scrape(keyword, region, min_subs, max_subs, batch_size, target_category, activity_filter):
+def _run_scrape(keyword, region, sub_tier, batch_size, target_category, activity_filter):
     _stop_event.clear()
     with _state_lock:
         _state["error"] = None
@@ -82,7 +82,7 @@ def _run_scrape(keyword, region, min_subs, max_subs, batch_size, target_category
 
             results = asyncio.run(
                 scrape_channels(
-                    keyword, region, min_subs, max_subs, batch_size,
+                    keyword, region, sub_tier, batch_size,
                     _progress_cb,
                     seen_handles=seen_handles,
                     scroll_passes=scroll_passes,
@@ -168,8 +168,9 @@ def start():
         return jsonify({"error": "Please provide a keyword."}), 400
 
     region = data.get("region", "TH")
-    min_subs = max(0, int(data.get("min_subs", 1000)))
-    max_subs = max(min_subs, int(data.get("max_subs", 10_000_000)))
+    sub_tier = data.get("sub_tier", "any")
+    if sub_tier not in ("under_5k", "5k_10k", "10k_100k", "100k_500k", "500k_1m", "over_1m", "any"):
+        sub_tier = "any"
     batch_size = min(int(data.get("batch_size", 5)), MAX_CHANNELS_PER_BATCH)
     target_category = (data.get("target_category") or "").strip()
     activity_filter = data.get("activity_filter", "any")
@@ -178,7 +179,7 @@ def start():
 
     t = threading.Thread(
         target=_run_scrape_thread,
-        args=(keyword, region, min_subs, max_subs, batch_size, target_category, activity_filter),
+        args=(keyword, region, sub_tier, batch_size, target_category, activity_filter),
         daemon=True,
     )
     t.start()
