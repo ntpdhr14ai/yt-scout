@@ -463,80 +463,88 @@ async def _scrape_about(page, ch_url: str, handle: str, region: str = '') -> tup
 
     return data, True, location_badge
 
-async def _scrape_tab_views(page, url, handle, tab_name):
-    for attempt in range(1, 4):
-        try:
-            _log_start(f"{tab_name} views (attempt {attempt})", handle)
-            await page.goto(url, wait_until='domcontentloaded', timeout=30000)
-            if tab_name == 'shorts' and '/shorts' not in page.url:
-                return None
-            if tab_name == 'live' and '/streams' not in page.url:
-                return None
-            await page.wait_for_load_state('networkidle', timeout=30000)
-            try:
-                await page.wait_for_selector(
-                    'ytd-rich-item-renderer, ytd-grid-video-renderer', timeout=8000
-                )
-            except Exception:
-                pass
-            await asyncio.sleep(random.uniform(2, 3))
-            for _ in range(4):
-                await page.evaluate('window.scrollBy(0, 500)')
-                await asyncio.sleep(1.5)
-            await asyncio.sleep(2)
-            items = []
-            view_words = ['view', 'วิว', 'ครั้ง', 'watch']
-            # Primary: parse ytd-rich-item-renderer inner text line by line
-            rich_els = await page.query_selector_all('ytd-rich-item-renderer')
-            for el in rich_els:
-                try:
-                    text = (await el.inner_text()).strip()
-                    for line in text.split('\n'):
-                        line = line.strip()
-                        if any(w in line.lower() for w in view_words):
-                            items.append(line)
-                            break
-                except Exception:
-                    pass
-            # Fallback: span-based selectors
-            if not items:
-                for sel in ['span.inline-metadata-item', '#metadata-line span', 'ytd-video-meta-block span', '#metadata span']:
-                    elements = await page.query_selector_all(sel)
-                    for el in elements:
-                        text = (await el.inner_text()).strip()
-                        if any(w in text.lower() for w in view_words):
-                            items.append(text)
-                    if items:
-                        break
-            if not items:
-                _log_retry(attempt, f"{tab_name} views empty", handle)
-                await asyncio.sleep(3)
-                continue
-            numbers = []
-            for t in items[:8]:
-                n = parse_view_count(t)
-                if n:
-                    numbers.append(n)
-            avg = int(sum(numbers) / len(numbers)) if numbers else None
-            _log_ok(f"{tab_name}_avg_views", avg, handle)
-            return avg
-        except Exception as e:
-            _log_failed(f"{tab_name} views", handle, e)
-            await asyncio.sleep(3)
-    return None
+async def scrape_tab_metrics(page, handle, tab, days_limit):
+    '''
+    Visit a channel tab, parse ytd-rich-item-renderer line by line.
+    Returns: {count: int, avg_views: int|None}
+    count = videos published within days_limit
+    avg_views = average views of those videos only
+    '''
+    TAB_URLS = {
+        'videos': f'https://www.youtube.com/@{handle}/videos',
+        'shorts': f'https://www.youtube.com/@{handle}/shorts',
+        'live':   f'https://www.youtube.com/@{handle}/streams',
+    }
+    url = TAB_URLS[tab]
+    print(f'[metrics] START: {tab} tab → @{handle} (last {days_limit}d)')
 
-# Rule D — 90-second hard timeout wrapper for tab scraping
-async def _scrape_tab_with_timeout(page, url, handle, tab_name):
     try:
-        return await asyncio.wait_for(
-            _scrape_tab_views(page, url, handle, tab_name), timeout=90
-        )
-    except asyncio.TimeoutError:
-        print(f'[scraper] TIMEOUT: {tab_name} → {handle} — exceeded 90s limit')
-        return None
+        await page.goto(url, wait_until='domcontentloaded', timeout=30000)
+        await page.wait_for_load_state('networkidle', timeout=20000)
+
+        # Redirect check — if tab is empty YouTube redirects to /videos
+        if tab == 'shorts' and '/shorts' not in page.url:
+            print(f'[metrics] EMPTY: {tab} tab redirected → @{handle}')
+            return {'count': 0, 'avg_views': None}
+        if tab == 'live' and '/streams' not in page.url:
+            print(f'[metrics] EMPTY: {tab} tab redirected → @{handle}')
+            return {'count': 0, 'avg_views': None}
+
+        await asyncio.sleep(_rand_delay(2, 4))
+        for _ in range(3):
+            await page.evaluate('window.scrollBy(0, 700)')
+            await asyncio.sleep(_rand_delay(1, 2))
+
+        renderers = await page.query_selector_all('ytd-rich-item-renderer')
+        print(f'[metrics] Renderers found: {len(renderers)} on {tab} tab')
+
+        in_window_views = []
+        in_window_count = 0
+
+        for renderer in renderers[:20]:  # sample max 20
+            try:
+                text = await renderer.inner_text()
+                lines = [l.strip() for l in text.splitlines() if l.strip()]
+
+                # Find date line
+                date_line = next(
+                    (l for l in lines if any(w in l.lower() for w in [
+                        'ago', 'hour', 'day', 'week', 'month', 'year',
+                        'วัน', 'สัปดาห์', 'เดือน', 'ปี', 'ชั่วโมง',
+                        'streamed', 'premiered'
+                    ])), None
+                )
+                if not date_line:
+                    continue
+
+                age_days = parse_recency(date_line)
+                if age_days > days_limit:
+                    continue  # outside timeframe
+
+                in_window_count += 1
+
+                # Find view count line
+                view_line = next(
+                    (l for l in lines if any(w in l.lower() for w in [
+                        'view', 'วิว', 'ครั้ง', 'watching'
+                    ])), None
+                )
+                if view_line:
+                    v = parse_view_count(view_line)
+                    if v is not None:
+                        in_window_views.append(v)
+
+            except Exception as e:
+                print(f'[metrics] Renderer parse error: {e}')
+                continue
+
+        avg = int(sum(in_window_views) / len(in_window_views)) if in_window_views else None
+        print(f'[metrics] OK: {tab} → count={in_window_count}, avg_views={avg}')
+        return {'count': in_window_count, 'avg_views': avg}
+
     except Exception as e:
-        print(f'[scraper] FAILED: {tab_name} views → {handle} — reason: {e}')
-        return None
+        print(f'[metrics] FAILED: {tab} → @{handle} — {e}')
+        return {'count': 0, 'avg_views': None}
 
 # ---------------------------------------------------------------------------
 # Core scraper
@@ -726,150 +734,61 @@ async def scrape_channels(
 
             await asyncio.sleep(_rand_delay(5, 10))
 
-            # Videos tab (Rule C/D — timeout-wrapped, never raises)
-            videos_url = ch_url.rstrip("/") + "/videos"
-            avg_video_views = await _scrape_tab_with_timeout(page, videos_url, handle, "videos")
-            channel_data["avg_video_views"] = avg_video_views
+            days_limit = int(activity_filter) if activity_filter != 'any' else 90
+            vid_metrics   = await scrape_tab_metrics(page, handle_bare, 'videos', days_limit)
+            short_metrics = await scrape_tab_metrics(page, handle_bare, 'shorts', days_limit)
+            live_metrics  = await scrape_tab_metrics(page, handle_bare, 'live',   days_limit)
 
-            # 30/60/90d recency counters — navigate to videos tab with full scroll/wait
-            videos_30d = videos_60d = videos_90d = 0
+            channel_data['upload_frequency'] = vid_metrics['count']
+            channel_data['avg_views_videos'] = vid_metrics['avg_views']
+            channel_data['avg_views_shorts'] = short_metrics['avg_views']
+            channel_data['avg_views_live']   = live_metrics['avg_views']
+
+            # Category extraction — navigate to first video page
+            category = None
+            videos_url = f'https://www.youtube.com/@{handle_bare}/videos'
             try:
-                await page.goto(videos_url, wait_until='domcontentloaded', timeout=30000)
-                await page.wait_for_load_state('networkidle', timeout=30000)
-                try:
-                    await page.wait_for_selector('ytd-rich-item-renderer', timeout=8000)
-                except Exception:
-                    pass
-                await asyncio.sleep(random.uniform(2, 3))
-                for _ in range(3):
-                    await page.evaluate('window.scrollBy(0, 600)')
-                    await asyncio.sleep(1.5)
-                await asyncio.sleep(2)
-                recent_titles = []
-                try:
-                    title_els = await page.query_selector_all('yt-formatted-string#video-title')
-                    for el in title_els[:8]:
-                        try:
-                            txt = (await el.inner_text()).strip()
-                            if txt:
-                                recent_titles.append(txt)
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-                date_texts = []
-                # Primary: parse ytd-rich-item-renderer inner text line by line
-                rich_els = await page.query_selector_all('ytd-rich-item-renderer')
-                for el in rich_els[:20]:
-                    try:
-                        text = (await el.inner_text()).strip()
-                        for line in text.split('\n'):
-                            line = line.strip()
-                            if _is_timestamp_text(line):
-                                date_texts.append(line)
-                                break
-                    except Exception:
-                        pass
-                # Fallback: span-based selectors
-                if not date_texts:
-                    for sel in ['span.inline-metadata-item', '#metadata-line span']:
-                        candidates = await page.query_selector_all(sel)
-                        for el in candidates:
-                            try:
-                                txt = (await el.inner_text()).strip()
-                                if _is_timestamp_text(txt):
-                                    date_texts.append(txt)
-                            except Exception:
-                                pass
-                        if date_texts:
+                await page.goto(videos_url, wait_until='domcontentloaded', timeout=20000)
+                first_video_href = None
+                for v_sel in ['a#video-title-link', 'ytd-rich-item-renderer a#thumbnail', 'a[href*="/watch?v="]']:
+                    el = await page.query_selector(v_sel)
+                    if el:
+                        href = await el.get_attribute('href')
+                        if href and '/watch' in href:
+                            first_video_href = href
                             break
-                if date_texts:
-                    v30 = v60 = v90 = 0
-                    for txt in date_texts[:20]:
-                        days = parse_recency(txt)
-                        if days <= 30:
-                            v30 += 1
-                        if days <= 60:
-                            v60 += 1
-                        if days <= 90:
-                            v90 += 1
-                    videos_30d, videos_60d, videos_90d = v30, v60, v90
-                _log_ok("videos_30/60/90d", f"{videos_30d}/{videos_60d}/{videos_90d}", handle)
-            except Exception as e:
-                videos_30d = videos_60d = videos_90d = 0
-                print(f'[scraper] FAIL-CLOSED: {handle} — recency parse failed, treating as inactive')
-                _log_failed("videos_30/60/90d", handle, e)
-            channel_data["videos_30d"] = videos_30d
-            channel_data["videos_60d"] = videos_60d
-            channel_data["videos_90d"] = videos_90d
-
-            skip_tabs = (videos_30d == 0 and videos_60d == 0 and videos_90d == 0)
-            if skip_tabs:
-                print(f'[scraper] SKIPPED tabs: {handle} — no uploads detected in 90d window, skipping view scraping')
-                channel_data["avg_video_views"] = None
-                channel_data["avg_short_views"] = None
-                channel_data["avg_live_views"] = None
-                channel_data["category"] = ""
-            else:
-                # Category extraction — navigate to first video page
-                category = None
-                try:
-                    first_video_href = None
-                    for v_sel in ['a#video-title-link', 'ytd-rich-item-renderer a#thumbnail', 'a[href*="/watch?v="]']:
-                        el = await page.query_selector(v_sel)
-                        if el:
-                            href = await el.get_attribute('href')
-                            if href and '/watch' in href:
-                                first_video_href = href
-                                break
-                    if first_video_href:
-                        if first_video_href.startswith('/'):
-                            first_video_href = f'https://www.youtube.com{first_video_href}'
-                        await page.goto(first_video_href, wait_until='networkidle', timeout=30000)
-                        el = await page.query_selector('meta[itemprop="genre"]')
+                if first_video_href:
+                    if first_video_href.startswith('/'):
+                        first_video_href = f'https://www.youtube.com{first_video_href}'
+                    await page.goto(first_video_href, wait_until='networkidle', timeout=30000)
+                    el = await page.query_selector('meta[itemprop="genre"]')
+                    if el:
+                        category = await el.get_attribute('content')
+                    if not category:
+                        el = await page.query_selector('meta[property="og:video:tag"]')
                         if el:
                             category = await el.get_attribute('content')
-                        if not category:
-                            el = await page.query_selector('meta[property="og:video:tag"]')
-                            if el:
-                                category = await el.get_attribute('content')
-                        _log_ok("category", category, handle)
-                        await asyncio.sleep(random.uniform(3, 5))
-                        await page.goto(videos_url, wait_until='domcontentloaded', timeout=20000)
-                    else:
-                        _log_failed("category", handle, "no first video link found")
-                except Exception as e:
-                    _log_failed("category", handle, e)
-                channel_data["category"] = category or ""
+                    _log_ok("category", category, handle)
+                else:
+                    _log_failed("category", handle, "no first video link found")
+            except Exception as e:
+                _log_failed("category", handle, e)
+            channel_data["category"] = category or ""
 
-                # Category filter (Rule A) — only skip if category extracted AND doesn't match
-                if target_category:
-                    if not category:
-                        channel_data["category"] = "Pending Check"
-                        print(f"[scraper] PENDING: category unextractable → {handle}, continuing")
-                    elif target_category.lower() not in category.lower():
-                        print(f"[scraper] SKIPPED: {handle} — category '{category}' does not match target '{target_category}'")
-                        await asyncio.sleep(_rand_delay(2, 5))
-                        continue
-
-                await asyncio.sleep(_rand_delay(5, 10))
-
-                # Shorts tab (Rule C/D)
-                shorts_url = ch_url.rstrip("/") + "/shorts"
-                avg_short_views = await _scrape_tab_with_timeout(page, shorts_url, handle, "shorts")
-                channel_data["avg_short_views"] = avg_short_views
-
-                await asyncio.sleep(_rand_delay(5, 10))
-
-                # Live tab (Rule C/D)
-                live_url = ch_url.rstrip("/") + "/streams"
-                avg_live_views = await _scrape_tab_with_timeout(page, live_url, handle, "live")
-                channel_data["avg_live_views"] = avg_live_views
+            # Category filter (Rule A) — only skip if category extracted AND doesn't match
+            if target_category:
+                if not category:
+                    channel_data["category"] = "Pending Check"
+                    print(f"[scraper] PENDING: category unextractable → {handle}, continuing")
+                elif target_category.lower() not in category.lower():
+                    print(f"[scraper] SKIPPED: {handle} — category '{category}' does not match target '{target_category}'")
+                    await asyncio.sleep(_rand_delay(2, 5))
+                    continue
 
             channel_data["score"] = _score_channel(
                 channel_data.get("subs"),
-                channel_data.get("avg_video_views"),
-                channel_data.get("avg_short_views"),
+                channel_data.get("avg_views_videos"),
+                channel_data.get("avg_views_shorts"),
                 None,
                 location_badge,
             )
@@ -877,9 +796,6 @@ async def scrape_channels(
             channel_data["channel_url"] = ch_canonical_url
             channel_data["handle"] = handle_bare
             channel_data["uc_id"] = uc_id
-
-            _days_map = {'30': 'videos_30d', '60': 'videos_60d', '90': 'videos_90d', 'any': 'videos_30d'}
-            channel_data['upload_frequency'] = channel_data.get(_days_map.get(activity_filter, 'videos_30d')) or '—'
 
             results.append(channel_data)
             print(f'[pipeline] ADDED: {handle} — now {len(results)} in results')

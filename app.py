@@ -272,9 +272,9 @@ def _flatten_row(r: dict) -> dict:
         "Location": _fmt(r.get("location_badge")),
         "Upload Frequency": _fmt(r.get("upload_frequency")),
         "Category": _fmt(r.get("category")),
-        "Avg Views Videos": _fmt(r.get("avg_video_views")),
-        "Avg Views Shorts": _fmt(r.get("avg_short_views")),
-        "Avg Views Live": _fmt(r.get("avg_live_views")),
+        "Avg Views Videos": _fmt(r.get("avg_views_videos")),
+        "Avg Views Shorts": _fmt(r.get("avg_views_shorts")),
+        "Avg Views Live": _fmt(r.get("avg_views_live")),
         "Contact": "; ".join(contact_parts) or "—",
     }
 
