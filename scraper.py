@@ -3,7 +3,7 @@ import sys
 import random
 import asyncio
 from collections import deque
-from urllib.parse import quote_plus
+import urllib.parse
 from playwright.async_api import async_playwright
 from playwright_stealth import Stealth
 
@@ -19,6 +19,7 @@ _YOUTUBE_TITLE_SUFFIX = " - YouTube"
 processed_handles: set = set()
 discovery_queue: deque = deque()
 stop_requested: bool = False
+video_context: dict = {}
 
 
 _COUNTRY_RE = re.compile(
@@ -554,78 +555,88 @@ async def scrape_channels(
         page = await context.new_page()
         await _stealth.apply_stealth_async(page)
 
-        # Search
-        channel_links: list[str] = []
+        # ── PHASE 2: Content-First Video Search ──────────────────────────
+        encoded_kw = urllib.parse.quote(keyword)
         search_url = (
-            f"https://www.youtube.com/results?search_query={quote_plus(keyword)}"
-            f"&gl=TH&hl=th"
+            f'https://www.youtube.com/results'
+            f'?search_query={encoded_kw}&gl=TH&hl=th'
         )
-        print(f"[scraper] Navigating to search: {search_url}")
-        await page.goto(search_url, wait_until="domcontentloaded")
-        await asyncio.sleep(_rand_delay(3, 6))
-        print(f"[scraper] Search page title: {await page.title()!r}")
+        print(f'[search] Navigating to: {search_url}')
+        await page.goto(search_url, wait_until='domcontentloaded', timeout=30000)
+        await asyncio.sleep(_rand_delay(3, 5))
 
-        page_title = await page.title()
-        page_url = page.url
-        body_length = len(await page.inner_text('body'))
-        print(f'[diag] Page title: {page_title}')
-        print(f'[diag] Page URL: {page_url}')
-        print(f'[diag] Body text length: {body_length} chars')
-        screenshot_path = r'C:\Users\Passorn\OneDrive - Tourism Authority of Thailand\Desktop\TheChuckyWay\yt-scout\yt_search_debug.png'
-        await page.screenshot(path=screenshot_path)
-        print(f'[diag] Screenshot saved to {screenshot_path}')
-
-        try:
-            accept_btn = page.locator("button", has_text="Accept all")
-            if await accept_btn.count() > 0:
-                await accept_btn.first.click()
-                await asyncio.sleep(2)
-                print("[scraper] Cookie dialog dismissed")
-        except Exception:
-            pass
-
-        for _ in range(scroll_passes):
-            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            await asyncio.sleep(_rand_delay(2, 4))
-
-        for _ in range(3):
+        # Scroll to load more video cards
+        for i in range(4):
             await page.evaluate('window.scrollBy(0, 800)')
-            await asyncio.sleep(random.uniform(1.5, 2.5))
+            await asyncio.sleep(_rand_delay(1, 2))
 
-        print(f'[search] Extracting handles from page source...')
-        # Get all anchor tags from the page that contain /@
-        all_anchors = await page.query_selector_all('a[href*="/@"]')
-        raw_handles = []
-        seen = set()
-        for anchor in all_anchors:
+        # Diagnostic
+        body_len = len(await page.inner_text('body'))
+        print(f'[search] Body length after scroll: {body_len} chars')
+
+        # Extract video cards — each card gives us: title, video URL, channel handle
+        video_cards = await page.query_selector_all('ytd-video-renderer')
+        print(f'[search] Video cards found: {len(video_cards)}')
+
+        # Build candidate list: {handle, video_title, video_url}
+        # Deduplicate by handle — keep first (highest-ranking) video per channel
+        candidates = {}  # handle → {video_title, video_url}
+        for card in video_cards:
             try:
-                href = await anchor.get_attribute('href')
-                if not href:
+                # Video title and URL
+                title_el = await card.query_selector('a#video-title')
+                if not title_el:
                     continue
-                # Extract handle from href like /@handlename or /@handlename/videos
-                if '/@' not in href:
+                video_title = (await title_el.inner_text()).strip()
+                video_href = await title_el.get_attribute('href')
+                if not video_href:
                     continue
-                handle = href.split('/@')[1].split('/')[0].strip()
+                video_url = f'https://www.youtube.com{video_href}'
+
+                # Channel handle from video card metadata
+                chan_el = await card.query_selector(
+                    '#channel-name a, '
+                    'ytd-channel-name a, '
+                    'a.yt-formatted-string[href*="/@"]'
+                )
+                if not chan_el:
+                    continue
+                chan_href = await chan_el.get_attribute('href')
+                if not chan_href or '/@' not in chan_href:
+                    continue
+                handle = chan_href.split('/@')[1].split('/')[0].strip()
                 if not handle:
                     continue
-                # Skip YouTube's own navigation links
-                if handle in ('', 'results', 'watch', 'shorts', 'feed', 'channel'):
-                    continue
-                if handle not in seen and handle not in processed_handles:
-                    seen.add(handle)
-                    raw_handles.append(handle)
-            except Exception:
-                continue
-        print(f'[search] Raw handles extracted: {len(raw_handles)} unique handles before filters')
-        print(f'[search] Handles: {raw_handles[:20]}')  # show first 20
-        print(f'[diag] Handles collected before filters: {len(raw_handles)} → {raw_handles[:15]}')
-        handles = raw_handles[:batch_size * 5]
 
-        channel_links = [f'/@{h}' for h in handles]
+                # Deduplicate — first occurrence = highest ranking
+                if handle not in candidates and handle not in processed_handles:
+                    candidates[handle] = {
+                        'video_title': video_title,
+                        'video_url': video_url,
+                    }
+                    print(f'[search] FOUND: @{handle} via "{video_title[:50]}"')
+
+            except Exception as e:
+                print(f'[search] Card parse error: {e}')
+                continue
+
+        print(f'[search] Total unique candidates: {len(candidates)}')
+        if not candidates:
+            print('[search] ZERO candidates — page may be partially rendered')
+            return []
+
+        # Populate module-level video_context for downstream use
+        video_context.update(candidates)
+
+        # Convert to list for pipeline processing
+        handle_list = list(candidates.keys())[:batch_size * 5]
+        # ── END PHASE 2 ───────────────────────────────────────────────────
+
+        channel_links = [f'/@{h}' for h in handle_list]
         for link in channel_links:
             seen_handles.add(link)
 
-        # Add discovery queue items from prior batches (Change 5)
+        # Add discovery queue items from prior batches
         disc_added = []
         while discovery_queue and (len(channel_links) + len(disc_added)) < batch_size * 2:
             h = discovery_queue.popleft()
