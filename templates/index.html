@@ -273,6 +273,10 @@
       border-radius: 100px;
     }
 
+    .video-title-cell { font-size: 0.82rem; max-width: 260px; }
+    .video-title-cell a { color: var(--blue); text-decoration: none; }
+    .video-title-cell a:hover { text-decoration: underline; }
+
     .contact-cell { font-size: 0.78rem; }
     .contact-cell a { color: var(--blue); text-decoration: none; }
     .contact-cell a:hover { text-decoration: underline; }
@@ -449,11 +453,11 @@
       <table id="resultsTable">
         <thead>
           <tr>
+            <th>Discovered Video</th>
             <th>Channel</th>
             <th>Subscribers</th>
             <th>Location</th>
             <th id="uploadFreqHeader">Upload Frequency<br><small style="font-weight:normal; opacity:0.6;">last 30 days</small></th>
-            <th>Category</th>
             <th>Avg Views<br><small>Videos</small></th>
             <th>Avg Views<br><small>Shorts</small></th>
             <th>Avg Views<br><small>Live</small></th>
@@ -534,25 +538,26 @@
     elResultsSection.style.display = 'block';
 
     newResults.forEach(r => {
-      const score = r.score ?? 0;
       const emails = (r.emails || []).map(e => `<a href="mailto:${e}">${e}</a>`).join('<br>');
       const links = (r.links || []).slice(0, 3).map(l => {
         const domain = l.replace(/https?:\/\//, '').split('/')[0];
         return `<a href="${l}" target="_blank" rel="noopener">${domain}</a>`;
       }).join('<br>');
       const contact = [emails, links].filter(Boolean).join('<br>') || '<span class="dash">—</span>';
-      const category = r.category || '<span class="dash">—</span>';
+      const discoveredVideo = (r.video_title && r.video_url)
+        ? `<a href="${r.video_url}" target="_blank" rel="noopener">${r.video_title}</a>`
+        : '<span class="dash">—</span>';
 
       const row = document.createElement('tr');
       const fmtFreq = v => (v === null || v === undefined || v === '—') ? '<span class="dash">—</span>' : v.toString();
       row.innerHTML = `
+        <td class="video-title-cell">${discoveredVideo}</td>
         <td class="channel-name">
           <a href="${r.channel_url || r.url}" target="_blank" rel="noopener">${r.name || r.handle || r.url}</a>
         </td>
         <td>${fmtNum(r.subs)}</td>
         <td>${locationBadge(r)}</td>
         <td>${fmtFreq(r.upload_frequency)}</td>
-        <td>${category}</td>
         <td>${fmtNum(r.avg_views_videos)}</td>
         <td>${fmtNum(r.avg_views_shorts)}</td>
         <td>${fmtNum(r.avg_views_live)}</td>

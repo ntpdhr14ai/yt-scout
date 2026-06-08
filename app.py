@@ -32,8 +32,9 @@ _state_lock = threading.Lock()
 _stop_event = threading.Event()
 
 _EXPORT_HEADERS = [
+    "Discovered Video Title", "Video URL",
     "Channel", "Handle", "Subscribers", "Location", "Upload Frequency",
-    "Category", "Avg Views Videos", "Avg Views Shorts", "Avg Views Live", "Contact",
+    "Avg Views Videos", "Avg Views Shorts", "Avg Views Live", "Contact",
 ]
 
 
@@ -266,12 +267,13 @@ def export_excel():
 def _flatten_row(r: dict) -> dict:
     contact_parts = list(r.get("emails") or []) + list(r.get("links") or [])
     return {
+        "Discovered Video Title": _fmt(r.get("video_title")),
+        "Video URL": _fmt(r.get("video_url")),
         "Channel": _fmt(r.get("name")),
         "Handle": _fmt(r.get("handle")),
         "Subscribers": _fmt(r.get("subs")),
         "Location": _fmt(r.get("location_badge")),
         "Upload Frequency": _fmt(r.get("upload_frequency")),
-        "Category": _fmt(r.get("category")),
         "Avg Views Videos": _fmt(r.get("avg_views_videos")),
         "Avg Views Shorts": _fmt(r.get("avg_views_shorts")),
         "Avg Views Live": _fmt(r.get("avg_views_live")),

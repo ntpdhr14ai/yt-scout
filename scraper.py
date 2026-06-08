@@ -797,6 +797,10 @@ async def scrape_channels(
             channel_data["handle"] = handle_bare
             channel_data["uc_id"] = uc_id
 
+            ctx = video_context.get(handle_bare, {})
+            channel_data['video_title'] = ctx.get('video_title', '')
+            channel_data['video_url']   = ctx.get('video_url', '')
+
             results.append(channel_data)
             print(f'[pipeline] ADDED: {handle} — now {len(results)} in results')
 
