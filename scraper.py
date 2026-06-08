@@ -237,33 +237,7 @@ def _score_channel(
 async def _scrape_subs(page, ch_url: str, handle: str) -> int | None:
     _log_start("_scrape_subs", handle)
 
-    print(f"[scraper] START: subs step 1 (yt-formatted-string#subscriber-count) -> {handle}")
-    try:
-        el = await page.query_selector("yt-formatted-string#subscriber-count")
-        if el:
-            txt = (await el.inner_text()).strip()
-            subs = _parse_sub_count(txt)
-            if subs is not None:
-                _log_ok("subs", f"{txt} -> {subs}", handle)
-                return subs
-        _log_failed("subs step 1", handle, "element not found")
-    except Exception as e:
-        _log_failed("subs step 1", handle, e)
-
-    print(f"[scraper] START: subs step 2 (#subscriber-count) -> {handle}")
-    try:
-        el = await page.query_selector("#subscriber-count")
-        if el:
-            txt = (await el.inner_text()).strip()
-            subs = _parse_sub_count(txt)
-            if subs is not None:
-                _log_ok("subs", f"{txt} -> {subs}", handle)
-                return subs
-        _log_failed("subs step 2", handle, "element not found")
-    except Exception as e:
-        _log_failed("subs step 2", handle, e)
-
-    print(f"[scraper] START: subs step 3 (span scan) -> {handle}")
+    print(f"[scraper] START: subs (span scan) -> {handle}")
     try:
         found = False
         for sel in ["yt-formatted-string", "span"]:
@@ -281,9 +255,9 @@ async def _scrape_subs(page, ch_url: str, handle: str) -> int | None:
             if found:
                 break
         if not found:
-            _log_failed("subs step 3", handle, "no matching span found")
+            _log_failed("subs", handle, "no matching span found")
     except Exception as e:
-        _log_failed("subs step 3", handle, e)
+        _log_failed("subs", handle, e)
 
     about_url = ch_url.rstrip("/") + "/about"
     print(f"[scraper] START: subs step 4 (about regex) -> {handle}")
