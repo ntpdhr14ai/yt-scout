@@ -164,9 +164,13 @@ def start():
             return jsonify({"error": "Scrape already running — use Stop to cancel"}), 409
 
     data = request.json or {}
-    keyword = (data.get("keyword") or "").strip()
-    if not keyword:
+    raw_keyword = (data.get("keyword") or "").strip()
+    if not raw_keyword:
         return jsonify({"error": "Please provide a keyword."}), 400
+    # Split on comma to support multi-keyword input from UI
+    keyword = [kw.strip() for kw in raw_keyword.split(',') if kw.strip()]
+    if not keyword:
+        keyword = ['']
 
     region = data.get("region", "TH")
     sub_tier = data.get("sub_tier", "any")

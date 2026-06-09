@@ -538,6 +538,16 @@ async def scrape_channels(
     if seen_handles is None:
         seen_handles = set()
     batch_size = min(batch_size, MAX_CHANNELS_PER_BATCH)
+
+    # Normalize keyword input to a list
+    if isinstance(keyword, str):
+        keyword_list = [kw.strip() for kw in keyword.split(',') if kw.strip()]
+    else:
+        keyword_list = [kw.strip() for kw in keyword if kw.strip()]
+    if not keyword_list:
+        keyword_list = ['']
+    print(f'[search] Keyword list: {keyword_list}')
+
     results: list[dict] = []
 
     async with async_playwright() as pw:
@@ -562,80 +572,99 @@ async def scrape_channels(
         await _stealth.apply_stealth_async(page)
 
         # ── PHASE 2: Content-First Video Search ──────────────────────────
-        encoded_kw = urllib.parse.quote(keyword)
-        search_url = (
-            f'https://www.youtube.com/results'
-            f'?search_query={encoded_kw}&gl=TH&hl=th'
-        )
-        print(f'[search] Navigating to: {search_url}')
-        await page.goto(search_url, wait_until='domcontentloaded', timeout=30000)
-        await asyncio.sleep(_rand_delay(3, 5))
+        all_candidates = {}  # unified dedup dict across all keywords
+        video_context.clear()
 
-        # Scroll to load more video cards
-        for i in range(4):
-            await page.evaluate('window.scrollBy(0, 800)')
-            await asyncio.sleep(_rand_delay(1, 2))
+        for current_kw in keyword_list:
+            print(f'[search] Processing keyword: "{current_kw}"')
+            encoded_kw = urllib.parse.quote(current_kw)
+            search_url = (
+                f'https://www.youtube.com/results'
+                f'?search_query={encoded_kw}&gl=TH&hl=th'
+            )
+            print(f'[search] Navigating to: {search_url}')
+            await page.goto(search_url, wait_until='domcontentloaded', timeout=30000)
+            await asyncio.sleep(_rand_delay(3, 5))
 
-        # Diagnostic
-        body_len = len(await page.inner_text('body'))
-        print(f'[search] Body length after scroll: {body_len} chars')
+            # Scroll to load more video cards
+            for i in range(4):
+                await page.evaluate('window.scrollBy(0, 800)')
+                await asyncio.sleep(_rand_delay(1, 2))
 
-        # Extract video cards — each card gives us: title, video URL, channel handle
-        video_cards = await page.query_selector_all('ytd-video-renderer')
-        print(f'[search] Video cards found: {len(video_cards)}')
+            # Diagnostic
+            body_len = len(await page.inner_text('body'))
+            print(f'[search] Body length after scroll: {body_len} chars')
 
-        # Build candidate list: {handle, video_title, video_url}
-        # Deduplicate by handle — keep first (highest-ranking) video per channel
-        candidates = {}  # handle → {video_title, video_url}
-        for card in video_cards:
-            try:
-                # Video title and URL
-                title_el = await card.query_selector('a#video-title')
-                if not title_el:
+            # Extract video cards — each card gives us: title, video URL, channel handle
+            video_cards = await page.query_selector_all('ytd-video-renderer')
+            print(f'[search] Video cards found: {len(video_cards)}')
+
+            kw_candidates = {}  # handle → {video_title, video_url}
+            for card in video_cards:
+                try:
+                    # Video title and URL
+                    title_el = await card.query_selector('a#video-title')
+                    if not title_el:
+                        continue
+                    video_title = (await title_el.inner_text()).strip()
+                    video_href = await title_el.get_attribute('href')
+                    if not video_href:
+                        continue
+                    video_url = f'https://www.youtube.com{video_href}'
+
+                    # Channel handle from video card metadata
+                    chan_el = await card.query_selector(
+                        '#channel-name a, '
+                        'ytd-channel-name a, '
+                        'a.yt-formatted-string[href*="/@"]'
+                    )
+                    if not chan_el:
+                        continue
+                    chan_href = await chan_el.get_attribute('href')
+                    if not chan_href or '/@' not in chan_href:
+                        continue
+                    handle = chan_href.split('/@')[1].split('/')[0].strip()
+                    if not handle:
+                        continue
+
+                    # Extract clean channel display name from the card
+                    channel_name_text = (await chan_el.inner_text()).strip()
+
+                    # Upstream dual-matching gate — keyword must appear in video title OR channel name
+                    kw_lower = current_kw.lower()
+                    if kw_lower and kw_lower not in video_title.lower() and kw_lower not in channel_name_text.lower():
+                        print(f'[search] SKIP card: keyword not in title or channel name — "{video_title[:40]}" / "{channel_name_text}"')
+                        continue
+
+                    # Accept candidate
+                    if handle not in kw_candidates and handle not in processed_handles:
+                        kw_candidates[handle] = {
+                            'video_title': video_title,
+                            'video_url': video_url,
+                            'channel_name': channel_name_text,
+                        }
+                        print(f'[search] ACCEPT: @{handle} — matched via "{"title" if kw_lower in video_title.lower() else "channel name"}"')
+
+                except Exception as e:
+                    print(f'[search] Card parse error: {e}')
                     continue
-                video_title = (await title_el.inner_text()).strip()
-                video_href = await title_el.get_attribute('href')
-                if not video_href:
-                    continue
-                video_url = f'https://www.youtube.com{video_href}'
 
-                # Channel handle from video card metadata
-                chan_el = await card.query_selector(
-                    '#channel-name a, '
-                    'ytd-channel-name a, '
-                    'a.yt-formatted-string[href*="/@"]'
-                )
-                if not chan_el:
-                    continue
-                chan_href = await chan_el.get_attribute('href')
-                if not chan_href or '/@' not in chan_href:
-                    continue
-                handle = chan_href.split('/@')[1].split('/')[0].strip()
-                if not handle:
-                    continue
+            new_count = 0
+            for handle, ctx in kw_candidates.items():
+                if handle not in all_candidates and handle not in processed_handles:
+                    all_candidates[handle] = ctx
+                    video_context[handle] = ctx
+                    new_count += 1
+            print(f'[search] Keyword "{current_kw}": +{new_count} new candidates (pool now {len(all_candidates)})')
+            await asyncio.sleep(_rand_delay(3, 6))
 
-                # Deduplicate — first occurrence = highest ranking
-                if handle not in candidates and handle not in processed_handles:
-                    candidates[handle] = {
-                        'video_title': video_title,
-                        'video_url': video_url,
-                    }
-                    print(f'[search] FOUND: @{handle} via "{video_title[:50]}"')
-
-            except Exception as e:
-                print(f'[search] Card parse error: {e}')
-                continue
-
-        print(f'[search] Total unique candidates: {len(candidates)}')
-        if not candidates:
+        print(f'[search] Total unique candidates after all keywords: {len(all_candidates)}')
+        if not all_candidates:
             print('[search] ZERO candidates — page may be partially rendered')
             return []
 
-        # Populate module-level video_context for downstream use
-        video_context.update(candidates)
-
         # Convert to list for pipeline processing
-        handle_list = list(candidates.keys())[:batch_size * 5]
+        handle_list = list(all_candidates.keys())[:batch_size * 5]
         # ── END PHASE 2 ───────────────────────────────────────────────────
 
         channel_links = [f'/@{h}' for h in handle_list]
@@ -709,9 +738,16 @@ async def scrape_channels(
             await asyncio.sleep(_rand_delay(5, 10))
 
             days_limit = int(activity_filter) if activity_filter != 'any' else 90
-            vid_metrics   = await scrape_tab_metrics(page, handle_bare, 'videos', days_limit)
-            short_metrics = await scrape_tab_metrics(page, handle_bare, 'shorts', days_limit)
-            live_metrics  = await scrape_tab_metrics(page, handle_bare, 'live',   days_limit)
+            vid_metrics = await scrape_tab_metrics(page, handle_bare, 'videos', days_limit)
+
+            # Early exit: if zero uploads in timeframe, skip Shorts and Live entirely
+            if vid_metrics['count'] == 0:
+                print(f'[pipeline] EARLY EXIT: @{handle_bare} — 0 uploads in last {days_limit}d, skipping Shorts/Live tabs')
+                short_metrics = {'count': 0, 'avg_views': None}
+                live_metrics  = {'count': 0, 'avg_views': None}
+            else:
+                short_metrics = await scrape_tab_metrics(page, handle_bare, 'shorts', days_limit)
+                live_metrics  = await scrape_tab_metrics(page, handle_bare, 'live',   days_limit)
 
             channel_data['upload_frequency'] = vid_metrics['count']
             channel_data['avg_views_videos'] = vid_metrics['avg_views']
