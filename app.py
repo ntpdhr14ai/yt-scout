@@ -51,6 +51,7 @@ def _progress_cb(done, total, msg):
 
 def _run_scrape(keyword, region, sub_tier, batch_size, target_category, activity_filter):
     _stop_event.clear()
+    scraper.reset_session_state()
     with _state_lock:
         _state["error"] = None
         _state["results"] = []

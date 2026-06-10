@@ -22,6 +22,16 @@ stop_requested: bool = False
 video_context: dict = {}
 
 
+def reset_session_state() -> None:
+    """Clear all cross-batch module state. Call ONCE at the start of a fresh
+    run, NEVER between batches — batch-to-batch dedup and loop termination
+    depend on processed_handles accumulating across batches within a run.
+    Uses .clear() (in-place) so external imports of these objects stay valid."""
+    processed_handles.clear()
+    discovery_queue.clear()
+    video_context.clear()
+
+
 _COUNTRY_RE = re.compile(
     r"^[A-Z]{2}$|Thailand|United States|United Kingdom|Japan|South Korea|"
     r"Korea|China|India|Brazil|Indonesia|Vietnam|Philippines|Malaysia|"
