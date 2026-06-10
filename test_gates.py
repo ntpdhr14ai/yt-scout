@@ -76,3 +76,22 @@ class TestParseRecency:
 
     def test_empty_maps_to_sentinel(self):
         assert parse_recency('') == 999
+
+
+# ---------------------------------------------------------------------------
+# TestPrecisionDelegation
+# ---------------------------------------------------------------------------
+
+class TestPrecisionDelegation:
+    # After TD-10, keyword relevance is delegated to YouTube ranking; the
+    # Thailand gate is the precision filter. These assertions lock that contract.
+    def test_thai_script_card_survives_without_keyword_in_title(self):
+        # a channel with no English keyword but Thai script must still pass location
+        passed, _ = gate_location({'about_text': 'สวัสดีครับ', 'declared_country': ''}, 'TH')
+        assert passed is True
+
+    def test_non_thai_card_still_rejected(self):
+        # irrelevant/non-Thai content is rejected at the location gate, not keyword gate
+        ch = {'declared_country': 'Philippines', 'about_text': 'Tagalog vlog', 'name': 'x'}
+        passed, _ = gate_location(ch, 'TH')
+        assert passed is False

@@ -642,12 +642,6 @@ async def scrape_channels(
                     # Extract clean channel display name from the card
                     channel_name_text = (await chan_el.inner_text()).strip()
 
-                    # Upstream dual-matching gate — keyword must appear in video title OR channel name
-                    kw_lower = current_kw.lower()
-                    if kw_lower and kw_lower not in video_title.lower() and kw_lower not in channel_name_text.lower():
-                        print(f'[search] SKIP card: keyword not in title or channel name — "{video_title[:40]}" / "{channel_name_text}"')
-                        continue
-
                     # Accept candidate
                     if handle not in kw_candidates and handle not in processed_handles:
                         kw_candidates[handle] = {
@@ -655,7 +649,7 @@ async def scrape_channels(
                             'video_url': video_url,
                             'channel_name': channel_name_text,
                         }
-                        print(f'[search] ACCEPT: @{handle} — matched via "{"title" if kw_lower in video_title.lower() else "channel name"}"')
+                        print(f'[search] ACCEPT: @{handle} — ranked by YouTube for "{current_kw}"')
 
                 except Exception as e:
                     print(f'[search] Card parse error: {e}')
@@ -824,6 +818,9 @@ async def scrape_channels(
             channel_data['video_url']   = ctx.get('video_url', '')
 
             results.append(channel_data)
+            if len(results) >= batch_size:
+                print(f'[pipeline] CAP: reached {batch_size} results this batch — stopping scrape')
+                break
             print(f'[pipeline] ADDED: {handle} — now {len(results)} in results')
 
             processed_handles.add(handle_bare)
