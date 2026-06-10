@@ -818,12 +818,12 @@ async def scrape_channels(
             channel_data['video_url']   = ctx.get('video_url', '')
 
             results.append(channel_data)
-            if len(results) >= batch_size:
-                print(f'[pipeline] CAP: reached {batch_size} results this batch — stopping scrape')
-                break
             print(f'[pipeline] ADDED: {handle} — now {len(results)} in results')
 
             processed_handles.add(handle_bare)
+            if len(results) >= batch_size:
+                print(f'[pipeline] CAP: reached {batch_size} results this batch — stopping scrape')
+                break
             _log_ok("channel_complete", channel_data.get("name", handle), handle)
             if progress_callback:
                 progress_callback(
