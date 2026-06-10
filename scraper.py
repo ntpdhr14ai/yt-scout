@@ -14,6 +14,7 @@ _stealth = Stealth()
 
 MAX_CHANNELS_PER_BATCH = 10
 COOLDOWN_SECONDS = 600
+SEARCH_SCROLL_PASSES = 8   # search-results page only; ~18 cards at 4 → ~35 at 8
 _YOUTUBE_TITLE_SUFFIX = " - YouTube"
 
 processed_handles: set = set()
@@ -598,7 +599,7 @@ async def scrape_channels(
             await asyncio.sleep(_rand_delay(3, 5))
 
             # Scroll to load more video cards
-            for i in range(4):
+            for i in range(SEARCH_SCROLL_PASSES):
                 await page.evaluate('window.scrollBy(0, 800)')
                 await asyncio.sleep(_rand_delay(1, 2))
 
