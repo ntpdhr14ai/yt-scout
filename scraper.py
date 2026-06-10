@@ -545,6 +545,7 @@ async def scrape_channels(
     target_category: str = '',
     activity_filter: str = 'any',
 ) -> list[dict]:
+    print(f'[diag] scrape_channels START — processed_handles={len(processed_handles)} discovery_queue={len(discovery_queue)}')
     if seen_handles is None:
         seen_handles = set()
     batch_size = min(batch_size, MAX_CHANNELS_PER_BATCH)
