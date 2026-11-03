@@ -555,6 +555,7 @@
         <td class="video-title-cell">${discoveredVideo}</td>
         <td class="channel-name">
           <a href="${r.channel_url || r.url}" target="_blank" rel="noopener">${r.name || r.handle || r.url}</a>
+          ${r.cached_at ? `<br><small class="dash" title="Loaded from library, not re-scraped">from library · checked ${r.cached_at.slice(0, 10)}</small>` : ''}
         </td>
         <td>${fmtNum(r.subs)}</td>
         <td>${locationBadge(r)}</td>

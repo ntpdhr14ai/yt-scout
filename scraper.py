@@ -7,6 +7,8 @@ import urllib.parse
 from playwright.async_api import async_playwright
 from playwright_stealth import Stealth
 
+import library
+
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
@@ -242,6 +244,59 @@ def gate_location(channel, region):
     if re.search(r'[฀-๿]', blob):
         return True, 'Thai script detected'
     return False, 'no Thailand signal found'
+
+def gate_category(category, target):
+    """Fail-closed: with a target set, unknown category is a rejection."""
+    if not target:
+        return True, 'no category filter'
+    if not category:
+        return False, f"category unknown, target '{target}'"
+    if target.lower() != category.lower():
+        return False, f"category '{category}' does not match target '{target}'"
+    return True, 'ok'
+
+
+def evaluate_cached(facts, stage, region, sub_tier, target_category, days_limit):
+    """Re-apply today's gates to stored facts.
+    Returns ('pass', row) | ('reject', reason) | ('scrape', reason)."""
+    ok, reason = gate_subscribers({'subs': facts.get('subs')}, sub_tier)
+    if not ok:
+        return 'reject', reason
+    if stage == library.STAGE_SUBS:
+        return 'scrape', 'only subscriber count on file'
+    if region == 'TH' and not facts.get('th_signal'):
+        return 'reject', 'no Thailand signal found'
+    if stage == library.STAGE_LOCATION:
+        return 'scrape', 'metrics not on file'
+    if facts.get('metrics_days') != days_limit:
+        return 'scrape', f"metrics on file are for {facts.get('metrics_days')}d, need {days_limit}d"
+    ok, reason = gate_category(facts.get('category') or None, target_category)
+    if not ok:
+        return 'reject', reason
+    count = facts.get('upload_frequency')
+    per_month = count * 30 / days_limit if isinstance(count, int) else None
+    row = dict(facts)
+    row['score'] = _score_channel(facts.get('subs'), facts.get('avg_views_videos'),
+                                  facts.get('avg_views_shorts'), per_month,
+                                  facts.get('location_badge'))
+    return 'pass', row
+
+
+_library_ok = True
+
+
+def _lib(fn, *args):
+    """Call a library function; on storage failure warn once and carry on scraping."""
+    global _library_ok
+    if not _library_ok:
+        return None
+    try:
+        return fn(*args)
+    except library.LibraryUnavailable as e:
+        _library_ok = False
+        print(f'[library] WARNING: disabled for this run — {e}')
+        return None
+
 
 def _score_channel(
     subs,
@@ -632,6 +687,8 @@ async def scrape_channels(
     target_category: str = '',
     activity_filter: str = 'any',
 ) -> list[dict]:
+    global _library_ok
+    _library_ok = True   # retry storage each run even if it failed last run
     print(f'[diag] scrape_channels START — processed_handles={len(processed_handles)} discovery_queue={len(discovery_queue)}')
     if seen_handles is None:
         seen_handles = set()
@@ -741,6 +798,9 @@ async def scrape_channels(
                     print(f'[search] Card parse error: {e}')
                     continue
 
+            for handle, ctx in kw_candidates.items():
+                _lib(library.record_sighting, handle, current_kw, ctx['video_title'], ctx['video_url'])
+
             new_count = 0
             for handle, ctx in kw_candidates.items():
                 if handle not in all_candidates and handle not in processed_handles:
@@ -774,6 +834,9 @@ async def scrape_channels(
         channel_links = channel_links + disc_added
         print(f"[scraper] Collected {len(channel_links)} channel links ({len(disc_added)} from discovery queue)")
 
+        days_limit = int(activity_filter) if activity_filter != 'any' else 30  # UI shows 30 for 'any'
+        cached_hits = 0   # library matches are shown but do not use up the batch cap
+
         # Per-channel loop
         for idx, ch_path in enumerate(channel_links):
             handle = ch_path.lstrip("/")        # @Amazing_Thailand
@@ -787,6 +850,25 @@ async def scrape_channels(
             # Record before any gate: a rejected channel must not be re-checked next batch
             processed_handles.add(handle_bare)
 
+            cached = _lib(library.lookup, handle_bare)
+            if cached:
+                facts, stage, checked_at = cached
+                verdict, payload = evaluate_cached(facts, stage, region, sub_tier,
+                                                   target_category, days_limit)
+                if verdict == 'reject':
+                    print(f'[library] SKIPPED: {handle} — {payload} (checked {checked_at})')
+                    continue
+                if verdict == 'pass':
+                    ctx = video_context.get(handle_bare, {})
+                    payload['video_title'] = ctx.get('video_title', '')
+                    payload['video_url'] = ctx.get('video_url', '')
+                    payload['cached_at'] = checked_at
+                    results.append(payload)
+                    cached_hits += 1
+                    print(f'[library] HIT: {handle} — from library (checked {checked_at})')
+                    continue
+                print(f'[library] RESCRAPE: {handle} — {payload}')
+
             await page.goto(ch_url, wait_until="domcontentloaded")
             await asyncio.sleep(random.uniform(3, 5))
 
@@ -796,6 +878,7 @@ async def scrape_channels(
             passed, reason = gate_subscribers({'subs': subs}, sub_tier)
             if not passed:
                 print(f'[scraper] SKIPPED: {handle} — {reason}')
+                _lib(library.save, handle_bare, {'handle': handle_bare, 'subs': subs}, library.STAGE_SUBS)
                 continue
 
             channel_data, keep, location_badge = await _scrape_about(page, ch_url, handle, region)
@@ -821,17 +904,22 @@ async def scrape_channels(
             _log_ok("uc_id", uc_id, handle)
             ch_canonical_url = f'https://www.youtube.com/channel/{uc_id}' if uc_id else ch_url
 
+            channel_data["subs"] = subs
+            channel_data["location_badge"] = location_badge
+            channel_data["th_signal"] = gate_location(channel_data, 'TH')[0]
+            channel_data["url"] = ch_canonical_url
+            channel_data["channel_url"] = ch_canonical_url
+            channel_data["handle"] = handle_bare
+            channel_data["uc_id"] = uc_id
+
             passed, reason = gate_location(channel_data, region)
             if not passed:
+                _lib(library.save, handle_bare, channel_data, library.STAGE_LOCATION)
                 await asyncio.sleep(_rand_delay(2, 5))
                 continue
 
-            channel_data["subs"] = subs
-            channel_data["location_badge"] = location_badge
-
             await asyncio.sleep(_rand_delay(5, 10))
 
-            days_limit = int(activity_filter) if activity_filter != 'any' else 30  # UI shows 30 for 'any'
             vid_metrics = await scrape_tab_metrics(page, handle_bare, 'videos', days_limit)
 
             # Early exit: if zero uploads in timeframe, skip Shorts and Live entirely
@@ -865,17 +953,15 @@ async def scrape_channels(
             else:
                 _log_failed("category", handle, "no first video link found")
             channel_data["category"] = category or ""
+            channel_data["metrics_days"] = days_limit
+            _lib(library.save, handle_bare, channel_data, library.STAGE_COMPLETE)
 
             # Category gate — fail-closed (DECISIONS: Fail-Closed Filter Gates)
-            if target_category:
-                if not category:
-                    print(f"[scraper] SKIPPED: {handle} — category unknown, target '{target_category}'")
-                    await asyncio.sleep(_rand_delay(2, 5))
-                    continue
-                if target_category.lower() != category.lower():
-                    print(f"[scraper] SKIPPED: {handle} — category '{category}' does not match target '{target_category}'")
-                    await asyncio.sleep(_rand_delay(2, 5))
-                    continue
+            passed, reason = gate_category(category, target_category)
+            if not passed:
+                print(f"[scraper] SKIPPED: {handle} — {reason}")
+                await asyncio.sleep(_rand_delay(2, 5))
+                continue
 
             vid_count = vid_metrics['count']
             per_month = vid_count * 30 / days_limit if isinstance(vid_count, int) else None
@@ -887,11 +973,6 @@ async def scrape_channels(
                 per_month,
                 location_badge,
             )
-            channel_data["url"] = ch_canonical_url
-            channel_data["channel_url"] = ch_canonical_url
-            channel_data["handle"] = handle_bare
-            channel_data["uc_id"] = uc_id
-
             ctx = video_context.get(handle_bare, {})
             channel_data['video_title'] = ctx.get('video_title', '')
             channel_data['video_url']   = ctx.get('video_url', '')
@@ -899,7 +980,7 @@ async def scrape_channels(
             results.append(channel_data)
             print(f'[pipeline] ADDED: {handle} — now {len(results)} in results')
 
-            if len(results) >= batch_size:
+            if len(results) - cached_hits >= batch_size:
                 print(f'[pipeline] CAP: reached {batch_size} results this batch — stopping scrape')
                 break
             _log_ok("channel_complete", channel_data.get("name", handle), handle)

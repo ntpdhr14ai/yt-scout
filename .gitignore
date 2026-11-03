@@ -8,3 +8,5 @@ thread.log
 flask_out.txt
 debug_search.png
 ss_*.png
+yt_scout.db
+yt_scout.db-journal
