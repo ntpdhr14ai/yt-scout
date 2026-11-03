@@ -113,3 +113,45 @@ def test_hard_ceiling():
     counts = list(range(10, 10 * (MAX_SEARCH_SCROLL_PASSES + 1), 10))
     stop, why = scroll_decision(MAX_SEARCH_SCROLL_PASSES, counts, 0, 9)
     assert stop and 'max' in why
+
+
+# --- About page (TD-23 / TD-28), fixtures from diag_about_output.txt 2026-11-03 ---
+from scraper import external_link, country_from_lines
+
+REDIRECT = ("https://www.youtube.com/redirect?event=channel_description&redir_token=QUlx"
+            "&q=https%3A%2F%2Fwww.instagram.com%2Fbas_gowentgo")
+
+
+def test_redirect_links_are_decoded():
+    assert external_link(REDIRECT) == "https://www.instagram.com/bas_gowentgo"
+    assert external_link("https://www.youtube.com/redirect?event=x&q=https%3A%2F%2Fline.me%2Fti%2Fp%2FPeR2y9-mXT") \
+        == "https://line.me/ti/p/PeR2y9-mXT"
+
+
+def test_youtube_and_google_links_are_dropped():
+    assert external_link("http://www.youtube.com/@GoWentGo") is None
+    assert external_link("https://accounts.google.com/ServiceLogin?service=youtube") is None
+    assert external_link("https://www.youtube.com/redirect?event=x") is None      # no q
+    assert external_link("https://www.youtube.com/redirect?q=https%3A%2F%2Fyoutu.be%2Fabc") is None
+    assert external_link(None) is None
+
+
+def test_direct_external_link_kept():
+    assert external_link("https://www.facebook.com/gowentgotravel") == "https://www.facebook.com/gowentgotravel"
+
+
+ABOUT_GOWENTGO = [
+    "Description", "ชื่อบาสครับ ชอบเดินทาง", "Links", "IG", "instagram.com/bas_gowentgo",
+    "More info", "Sign in to see email address", "www.youtube.com/@GoWentGo", "Thailand",
+    "Joined Oct 7, 2017", "1.98M subscribers", "1,049 videos", "465,597,089 views",
+]
+
+
+def test_country_from_about_lines():
+    assert country_from_lines(ABOUT_GOWENTGO) == "Thailand"
+
+
+def test_country_not_taken_from_partial_matches():
+    """TD-28: a studio name was once captured as the country."""
+    lines = ["Hanumanloylom Studio 56 - HANUMANLOYLOMSTUDIO56", "Trip to Thailand 2026", "Joined 2006"]
+    assert country_from_lines(lines) == ""

@@ -39,15 +39,46 @@ def reset_session_state() -> None:
     video_context.clear()
 
 
-_COUNTRY_RE = re.compile(
-    r"^[A-Z]{2}$|Thailand|United States|United Kingdom|Japan|South Korea|"
-    r"Korea|China|India|Brazil|Indonesia|Vietnam|Philippines|Malaysia|"
-    r"Singapore|Australia|Germany|France|Canada|Russia|Mexico|Spain|"
-    r"Italy|Netherlands|Turkey|Egypt|Nigeria|Pakistan|Myanmar|Cambodia|"
-    r"Laos|Taiwan|New Zealand|Argentina|Colombia|Chile|Ukraine|Poland|"
-    r"Portugal|Greece|Hong Kong",
+# Whole-line country names, as shown in the About dialog table (diag 2026-11-03:
+# a row reading just "Thailand"). Anchored so a description line can't match.
+_COUNTRY_LINE_RE = re.compile(
+    r"^(?:Thailand|United States|United Kingdom|Japan|South Korea|Korea|China|India|"
+    r"Brazil|Indonesia|Vietnam|Philippines|Malaysia|Singapore|Australia|Germany|"
+    r"France|Canada|Russia|Mexico|Spain|Italy|Netherlands|Turkey|Egypt|Nigeria|"
+    r"Pakistan|Myanmar \(Burma\)|Myanmar|Cambodia|Laos|Taiwan|New Zealand|Argentina|"
+    r"Colombia|Chile|Ukraine|Poland|Portugal|Greece|Hong Kong|ไทย|ประเทศไทย)$",
     re.IGNORECASE,
 )
+
+
+def country_from_lines(lines) -> str:
+    """First line that is exactly a country name; '' if none (unknown, not Thai)."""
+    for line in lines:
+        t = (line or "").strip()
+        if _COUNTRY_LINE_RE.match(t):
+            return t
+    return ""
+
+
+def external_link(href: str | None) -> str | None:
+    """Destination of an About-page link. YouTube wraps external links as
+    youtube.com/redirect?...&q=<url>; links back to YouTube/Google are dropped."""
+    if not href:
+        return None
+    parsed = urllib.parse.urlparse(href)
+    if parsed.path == "/redirect" and "youtube.com" in parsed.netloc:
+        q = urllib.parse.parse_qs(parsed.query).get("q")
+        href = q[0] if q else None
+        if not href:
+            return None
+        parsed = urllib.parse.urlparse(href)
+    if parsed.scheme not in ("http", "https"):
+        return None
+    host = parsed.netloc.lower()
+    if any(h in host for h in ("youtube.com", "youtu.be", "google.com")):
+        return None
+    return href
+
 
 _THAI_DIGIT_MAP = str.maketrans("๐๑๒๓๔๕๖๗๘๙", "0123456789")
 
@@ -514,24 +545,17 @@ async def _scrape_about(page, ch_url: str, handle: str, region: str = '') -> tup
         except Exception as e:
             _log_failed("sub_text", handle, e)
 
+        # Country is an unlabeled row in the About dialog table ("Thailand")
         country = ""
-        m = re.search(r"(?:Location|Country)\s*[:\|]\s*([^\n\r]+)", body_text, re.IGNORECASE)
-        if m:
-            country = m.group(1).strip()
-            _log_ok("country (body label)", country, handle)
-        if not country:
-            try:
-                loc_els = await page.locator(
-                    "yt-formatted-string.ytd-channel-about-metadata-renderer"
-                ).all()
-                for el in loc_els:
-                    txt = (await el.inner_text()).strip()
-                    if txt and _COUNTRY_RE.search(txt):
-                        country = txt
-                        _log_ok("country (selector)", country, handle)
-                        break
-            except Exception as e:
-                _log_failed("country (selector)", handle, e)
+        try:
+            rows = await page.eval_on_selector_all(
+                "ytd-about-channel-renderer table tr", "els => els.map(e => e.innerText)")
+            country = country_from_lines(
+                l for r in rows for l in (r or "").splitlines())
+            if country:
+                _log_ok("country (about table)", country, handle)
+        except Exception as e:
+            _log_failed("country (about table)", handle, e)
         data["country"] = country
         data["declared_country"] = country
 
@@ -570,12 +594,13 @@ async def _scrape_about(page, ch_url: str, handle: str, region: str = '') -> tup
             _log_failed("emails", handle, e)
 
         try:
-            link_els = await page.locator("#link-list-container a").all()
+            hrefs = await page.eval_on_selector_all(
+                "#link-list-container a", "els => els.map(e => e.getAttribute('href'))")
             links = []
-            for el in link_els:
-                href = (await el.get_attribute("href")) or ""
-                if href.startswith("http") and "youtube.com" not in href:
-                    links.append(href)
+            for href in hrefs:
+                dest = external_link(href)
+                if dest and dest not in links:
+                    links.append(dest)
             data["links"] = links[:5]
             _log_ok("links", data["links"], handle)
         except Exception as e:
