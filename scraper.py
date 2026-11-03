@@ -16,9 +16,10 @@ _stealth = Stealth()
 
 MAX_CHANNELS_PER_BATCH = 10
 COOLDOWN_SECONDS = 600
-SEARCH_SCROLL_PASSES = 8        # minimum scrolls on the search page (unchanged depth for batch 1)
-MAX_SEARCH_SCROLL_PASSES = 40   # hard ceiling per keyword (~60 s at the kept 1–2 s delay)
-SEARCH_STALL_PASSES = 3         # page counts as exhausted after this many scrolls with no new cards
+SEARCH_SCROLL_PASSES = 1        # minimum loads before the new-channel target may stop scrolling
+MAX_SEARCH_SCROLL_PASSES = 20   # hard ceiling per keyword (~10–20 cards per load -> ~300 cards)
+SEARCH_STALL_PASSES = 3         # at the loader, no new cards this many times -> exhausted
+SEARCH_LOAD_WAIT_SECONDS = 8    # how long to wait for the next batch of cards after each load
 NEW_CANDIDATES_PER_RESULT = 3   # aim for batch_size x 3 unseen channels before stopping
 _YOUTUBE_TITLE_SUFFIX = " - YouTube"
 
@@ -306,9 +307,13 @@ def _lib(fn, *args):
         return None
 
 
-def scroll_decision(passes: int, card_counts: list[int], new_count: int, target: int):
-    """Whether to keep scrolling the search page. Returns (stop, reason).
-    card_counts: cards on the page after each pass so far."""
+def scroll_decision(passes: int, card_counts: list[int], new_count: int, target: int,
+                    has_loader: bool = True):
+    """Whether to keep loading search results. Returns (stop, reason).
+    card_counts: cards on the page after each load so far.
+    has_loader: YouTube's continuation spinner is still on the page."""
+    if not has_loader:
+        return True, 'end of results (no loader on page)'
     if passes < SEARCH_SCROLL_PASSES:
         return False, 'minimum depth'
     if new_count >= target:
@@ -317,7 +322,7 @@ def scroll_decision(passes: int, card_counts: list[int], new_count: int, target:
         return True, f'max {MAX_SEARCH_SCROLL_PASSES} scrolls'
     recent = card_counts[-(SEARCH_STALL_PASSES + 1):]
     if len(recent) == SEARCH_STALL_PASSES + 1 and len(set(recent)) == 1:
-        return True, f'no new cards for {SEARCH_STALL_PASSES} scrolls (results exhausted)'
+        return True, f'no new cards after {SEARCH_STALL_PASSES} loads at the loader (results exhausted)'
     return False, 'need more'
 
 
@@ -779,15 +784,27 @@ async def scrape_channels(
                     known_cache[h] = _lib(library.lookup, h) is None
                 return known_cache[h]
 
+            # Jump to YouTube's loader each time: scrolling 800 px at a time stopped
+            # ~400 px short of it and the page never asked for more (diag 2026-11-03).
             card_counts, passes = [], 0
             while True:
-                await page.evaluate('window.scrollBy(0, 800)')
+                before = await page.evaluate("document.querySelectorAll('ytd-video-renderer').length")
+                loader = await page.query_selector('ytd-continuation-item-renderer')
+                if loader:
+                    await loader.scroll_into_view_if_needed()
+                else:
+                    await page.evaluate('window.scrollTo(0, document.documentElement.scrollHeight)')
                 await asyncio.sleep(_rand_delay(1, 2))
+                for _ in range(SEARCH_LOAD_WAIT_SECONDS * 2):
+                    if await page.evaluate("document.querySelectorAll('ytd-video-renderer').length") > before:
+                        break
+                    await asyncio.sleep(0.5)
                 passes += 1
                 handles = [h for h in await page.evaluate(_CARD_HANDLES_JS) if h]
                 card_counts.append(len(handles))
                 new_count = len({h for h in handles if _is_new(h)})
-                stop, why = scroll_decision(passes, card_counts, new_count, target_new)
+                has_loader = await page.query_selector('ytd-continuation-item-renderer') is not None
+                stop, why = scroll_decision(passes, card_counts, new_count, target_new, has_loader)
                 if stop:
                     print(f'[search] Scroll stop after {passes} passes: {why} ({len(handles)} cards)')
                     break
