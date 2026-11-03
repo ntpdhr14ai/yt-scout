@@ -16,7 +16,10 @@ _stealth = Stealth()
 
 MAX_CHANNELS_PER_BATCH = 10
 COOLDOWN_SECONDS = 600
-SEARCH_SCROLL_PASSES = 8   # search-results page only; ~18 cards at 4 → ~35 at 8
+SEARCH_SCROLL_PASSES = 8        # minimum scrolls on the search page (unchanged depth for batch 1)
+MAX_SEARCH_SCROLL_PASSES = 40   # hard ceiling per keyword (~60 s at the kept 1–2 s delay)
+SEARCH_STALL_PASSES = 3         # page counts as exhausted after this many scrolls with no new cards
+NEW_CANDIDATES_PER_RESULT = 3   # aim for batch_size x 3 unseen channels before stopping
 _YOUTUBE_TITLE_SUFFIX = " - YouTube"
 
 processed_handles: set = set()
@@ -301,6 +304,28 @@ def _lib(fn, *args):
         _library_ok = False
         print(f'[library] WARNING: disabled for this run — {e}')
         return None
+
+
+def scroll_decision(passes: int, card_counts: list[int], new_count: int, target: int):
+    """Whether to keep scrolling the search page. Returns (stop, reason).
+    card_counts: cards on the page after each pass so far."""
+    if passes < SEARCH_SCROLL_PASSES:
+        return False, 'minimum depth'
+    if new_count >= target:
+        return True, f'{new_count} new channels (target {target})'
+    if passes >= MAX_SEARCH_SCROLL_PASSES:
+        return True, f'max {MAX_SEARCH_SCROLL_PASSES} scrolls'
+    recent = card_counts[-(SEARCH_STALL_PASSES + 1):]
+    if len(recent) == SEARCH_STALL_PASSES + 1 and len(set(recent)) == 1:
+        return True, f'no new cards for {SEARCH_STALL_PASSES} scrolls (results exhausted)'
+    return False, 'need more'
+
+
+_CARD_HANDLES_JS = """() => [...document.querySelectorAll('ytd-video-renderer')].map(c => {
+  const a = c.querySelector('#channel-name a, ytd-channel-name a, a.yt-formatted-string[href*="/@"]');
+  const h = a && a.getAttribute('href');
+  return h && h.includes('/@') ? h.split('/@')[1].split('/')[0].trim() : null;
+})"""
 
 
 def _score_channel(
@@ -687,16 +712,12 @@ async def scrape_channels(
     sub_tier: str,
     batch_size: int,
     progress_callback=None,
-    seen_handles: set | None = None,
-    scroll_passes: int = 0,
     target_category: str = '',
     activity_filter: str = 'any',
 ) -> list[dict]:
     global _library_ok
     _library_ok = True   # retry storage each run even if it failed last run
     print(f'[diag] scrape_channels START — processed_handles={len(processed_handles)} discovery_queue={len(discovery_queue)}')
-    if seen_handles is None:
-        seen_handles = set()
     batch_size = min(batch_size, MAX_CHANNELS_PER_BATCH)
 
     # Normalize keyword input to a list
@@ -746,10 +767,30 @@ async def scrape_channels(
             await page.goto(search_url, wait_until='domcontentloaded', timeout=30000)
             await asyncio.sleep(_rand_delay(3, 5))
 
-            # Scroll to load more video cards
-            for i in range(SEARCH_SCROLL_PASSES):
+            # Scroll until enough channels we have not seen yet (this run or in the
+            # library) are on the page, or the page stops loading new cards.
+            target_new = batch_size * NEW_CANDIDATES_PER_RESULT
+            known_cache: dict = {}
+
+            def _is_new(h):
+                if h in processed_handles:
+                    return False
+                if h not in known_cache:
+                    known_cache[h] = _lib(library.lookup, h) is None
+                return known_cache[h]
+
+            card_counts, passes = [], 0
+            while True:
                 await page.evaluate('window.scrollBy(0, 800)')
                 await asyncio.sleep(_rand_delay(1, 2))
+                passes += 1
+                handles = [h for h in await page.evaluate(_CARD_HANDLES_JS) if h]
+                card_counts.append(len(handles))
+                new_count = len({h for h in handles if _is_new(h)})
+                stop, why = scroll_decision(passes, card_counts, new_count, target_new)
+                if stop:
+                    print(f'[search] Scroll stop after {passes} passes: {why} ({len(handles)} cards)')
+                    break
 
             # Diagnostic
             body_len = len(await page.inner_text('body'))
@@ -821,12 +862,14 @@ async def scrape_channels(
             return []
 
         # Convert to list for pipeline processing
-        handle_list = list(all_candidates.keys())[:batch_size * 5]
+        # Library-known channels cost ~0 s, so only new channels count toward the work cap
+        known = [h for h in all_candidates if _lib(library.lookup, h) is not None]
+        new = [h for h in all_candidates if h not in known][:batch_size * 5]
+        handle_list = known + new
+        print(f'[search] Candidates: {len(new)} new + {len(known)} from library')
         # ── END PHASE 2 ───────────────────────────────────────────────────
 
         channel_links = [f'/@{h}' for h in handle_list]
-        for link in channel_links:
-            seen_handles.add(link)
 
         # Add discovery queue items from prior batches
         disc_added = []
@@ -844,6 +887,9 @@ async def scrape_channels(
 
         # Per-channel loop
         for idx, ch_path in enumerate(channel_links):
+            if stop_requested:
+                print('[pipeline] STOP requested — ending batch')
+                break
             handle = ch_path.lstrip("/")        # @Amazing_Thailand
             handle_bare = handle.lstrip("@")    # Amazing_Thailand
             ch_url = f"https://www.youtube.com{ch_path}"

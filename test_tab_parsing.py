@@ -78,3 +78,34 @@ def test_real_tabs_are_kept():
     assert is_fallback_grid("shorts", "/shorts/abcdefghijk", V) is False
     assert is_fallback_grid("live", "/watch?v=LIVEstream01", V) is False
     assert is_fallback_grid("live", None, V) is False
+
+
+# --- adaptive search scrolling (phase 3) ---------------------------------------
+from scraper import scroll_decision, SEARCH_SCROLL_PASSES, MAX_SEARCH_SCROLL_PASSES
+
+
+def test_keeps_minimum_depth_even_with_enough_new():
+    assert scroll_decision(3, [10, 15, 20], 50, 9)[0] is False
+
+
+def test_batch_one_unchanged_stops_at_minimum_depth():
+    counts = [5, 8, 11, 13, 15, 17, 19, 20]
+    stop, why = scroll_decision(SEARCH_SCROLL_PASSES, counts, 12, 9)
+    assert stop and 'new channels' in why
+
+
+def test_keeps_scrolling_when_everything_is_already_known():
+    counts = [5, 8, 11, 13, 15, 17, 19, 20]
+    assert scroll_decision(SEARCH_SCROLL_PASSES, counts, 0, 9)[0] is False
+
+
+def test_stops_when_page_stops_growing():
+    counts = [5, 8, 11, 13, 15, 17, 19, 20, 24, 24, 24, 24]
+    stop, why = scroll_decision(12, counts, 2, 9)
+    assert stop and 'exhausted' in why
+
+
+def test_hard_ceiling():
+    counts = list(range(1, MAX_SEARCH_SCROLL_PASSES + 1))
+    stop, why = scroll_decision(MAX_SEARCH_SCROLL_PASSES, counts, 0, 9)
+    assert stop and 'max' in why

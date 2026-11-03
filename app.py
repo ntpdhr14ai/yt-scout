@@ -65,7 +65,6 @@ def _run_scrape(keyword, region, sub_tier, batch_size, target_category, activity
         _state["cooldown_until"] = 0
         _state["activity_filter"] = activity_filter
 
-    seen_handles: set = set()
     batch_num = 0
     _preserve_message = False
 
@@ -75,7 +74,6 @@ def _run_scrape(keyword, region, sub_tier, batch_size, target_category, activity
                 break
 
             batch_num += 1
-            scroll_passes = (batch_num - 1) * 3
 
             with _state_lock:
                 _state["running"] = True
@@ -87,8 +85,6 @@ def _run_scrape(keyword, region, sub_tier, batch_size, target_category, activity
                 scrape_channels(
                     keyword, region, sub_tier, batch_size,
                     _progress_cb,
-                    seen_handles=seen_handles,
-                    scroll_passes=scroll_passes,
                     target_category=target_category,
                     activity_filter=activity_filter,
                 )
