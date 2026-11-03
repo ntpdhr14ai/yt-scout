@@ -8,7 +8,7 @@ from playwright.async_api import async_playwright
 from playwright_stealth import Stealth
 
 if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
 _stealth = Stealth()
 
@@ -130,6 +130,9 @@ def _months_ago(text: str) -> float | None:
 
 def parse_recency(text: str) -> int:
     if not text: return 999
+    strict = age_days_from_line(text)
+    if strict is not None:
+        return strict
     t = text.lower().strip()
     for prefix in ['streamed','premiered','updated','scheduled','เผยแพร่เมื่อ','สตรีมเมื่อ','อัปเดตเมื่อ']:
         t = t.replace(prefix, '').strip()
@@ -141,6 +144,66 @@ def parse_recency(text: str) -> int:
     if any(w in t for w in ['month','เดือน']): return num(t) * 30
     if any(w in t for w in ['year','ปี']): return 999
     return 999
+
+
+# Whole-line patterns only: a title that merely contains "day" or "วัน" must
+# never be read as an upload date.
+_AGE_EN_RE = re.compile(
+    r"^(?:streamed|premiered|updated)?\s*(\d+)\s*"
+    r"(seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h|days?|d|weeks?|wks?|w|months?|mo|years?|yrs?|y)"
+    r"\s+ago$",
+    re.IGNORECASE,
+)
+_AGE_TH_RE = re.compile(
+    r"^(?:สตรีมเมื่อ|เผยแพร่เมื่อ|อัปเดตเมื่อ)?\s*(\d+)\s*"
+    r"(วินาที|นาที|ชั่วโมง|ชม\.|วัน|สัปดาห์|เดือน|ปี)\s*ที่แล้ว$"
+)
+_UNIT_DAYS = {
+    "s": 0, "sec": 0, "second": 0, "m": 0, "min": 0, "minute": 0,
+    "h": 0, "hr": 0, "hour": 0, "d": 1, "day": 1, "w": 7, "wk": 7, "week": 7,
+    "mo": 30, "month": 30, "y": None, "yr": None, "year": None,
+    "วินาที": 0, "นาที": 0, "ชั่วโมง": 0, "ชม.": 0, "วัน": 1, "สัปดาห์": 7,
+    "เดือน": 30, "ปี": None,
+}
+_VIEWS_RE = re.compile(
+    r"^([\d.,]+)\s*([KMB])?(?:\s*(?:views?|watching))?$", re.IGNORECASE
+)
+
+
+def age_days_from_line(line: str) -> int | None:
+    """'8h ago' -> 0, '1d ago' -> 1, '2 weeks ago' -> 14, '1y ago' -> 999.
+    Returns None if the whole line is not an age stamp."""
+    t = (line or "").strip().translate(_THAI_DIGIT_MAP)
+    m = _AGE_EN_RE.match(t) or _AGE_TH_RE.match(t)
+    if not m:
+        return None
+    n, unit = int(m.group(1)), m.group(2).lower()
+    if unit not in _UNIT_DAYS:
+        unit = unit.rstrip("s")
+    per = _UNIT_DAYS.get(unit, None)
+    return 999 if per is None else n * per
+
+
+def views_from_line(line: str) -> int | None:
+    """'4.7K' -> 4700, '203' -> 203, '14K views' -> 14000. None otherwise."""
+    m = _VIEWS_RE.match((line or "").strip())
+    if not m:
+        return None
+    return _parse_sub_count(m.group(1) + (m.group(2) or ""))
+
+
+def parse_renderer_lines(lines: list[str]) -> tuple[int | None, int | None]:
+    """(age_days, views) for one grid item. Layout seen 2026-11:
+    [duration, title, views, age]. Views = nearest view-shaped line above age."""
+    for i, line in enumerate(lines):
+        age = age_days_from_line(line)
+        if age is not None:
+            for prev in reversed(lines[:i]):
+                v = views_from_line(prev)
+                if v is not None:
+                    return age, v
+            return age, None
+    return None, None
 
 
 def _is_timestamp_text(txt: str) -> bool:
@@ -401,9 +464,9 @@ async def _scrape_about(page, ch_url: str, handle: str, region: str = '') -> tup
             data.setdefault("links", [])
             return data, False, "?"
 
+        # Email reveal button needs a signed-in session; logged out it never
+        # appears (4 s timeout on every channel, seen 2026-11). Scan page text only.
         try:
-            await page.click("tp-yt-paper-button#email-reveal-button", timeout=4000)
-            await asyncio.sleep(2)
             page_text = await page.content()
             emails = re.findall(
                 r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}", page_text
@@ -413,17 +476,8 @@ async def _scrape_about(page, ch_url: str, handle: str, region: str = '') -> tup
             )
             _log_ok("emails", data["emails"], handle)
         except Exception as e:
-            _log_failed("email_button", handle, e)
-            try:
-                page_text = await page.content()
-                emails = re.findall(
-                    r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}", page_text
-                )
-                data["emails"] = list(
-                    set(e for e in emails if "youtube" not in e and "google" not in e)
-                )
-            except Exception:
-                data.setdefault("emails", [])
+            data["emails"] = []
+            _log_failed("emails", handle, e)
 
         try:
             link_els = await page.locator("#link-list-container a").all()
@@ -450,10 +504,13 @@ async def _scrape_about(page, ch_url: str, handle: str, region: str = '') -> tup
 
 async def scrape_tab_metrics(page, handle, tab, days_limit):
     '''
-    Visit a channel tab, parse ytd-rich-item-renderer line by line.
-    Returns: {count: int, avg_views: int|None}
-    count = videos published within days_limit
-    avg_views = average views of those videos only
+    Visit a channel tab and read the grid items.
+    Returns {count, avg_views, first_video_url}
+      videos/live: count = items whose age stamp is inside days_limit;
+                   avg_views = mean views of those items.
+                   count None = tab could not be read (unknown, not zero).
+      shorts:      the grid shows no dates, so count is None and avg_views is
+                   the mean of the newest 20 Shorts (window not applied).
     '''
     TAB_URLS = {
         'videos': f'https://www.youtube.com/@{handle}/videos',
@@ -461,19 +518,29 @@ async def scrape_tab_metrics(page, handle, tab, days_limit):
         'live':   f'https://www.youtube.com/@{handle}/streams',
     }
     url = TAB_URLS[tab]
-    print(f'[metrics] START: {tab} tab → @{handle} (last {days_limit}d)')
+    unknown = {'count': None, 'avg_views': None, 'first_video_url': None}
+    print(f'[metrics] START: {tab} tab -> @{handle} (last {days_limit}d)')
 
     try:
         await page.goto(url, wait_until='domcontentloaded', timeout=30000)
-        await page.wait_for_load_state('networkidle', timeout=20000)
 
-        # Redirect check — if tab is empty YouTube redirects to /videos
+        # Redirect check — if tab is empty YouTube may redirect to /videos
         if tab == 'shorts' and '/shorts' not in page.url:
-            print(f'[metrics] EMPTY: {tab} tab redirected → @{handle}')
-            return {'count': 0, 'avg_views': None}
+            print(f'[metrics] EMPTY: {tab} tab redirected -> @{handle}')
+            return {'count': 0, 'avg_views': None, 'first_video_url': None}
         if tab == 'live' and '/streams' not in page.url:
-            print(f'[metrics] EMPTY: {tab} tab redirected → @{handle}')
-            return {'count': 0, 'avg_views': None}
+            print(f'[metrics] EMPTY: {tab} tab redirected -> @{handle}')
+            return {'count': 0, 'avg_views': None, 'first_video_url': None}
+
+        try:
+            await page.wait_for_selector('ytd-rich-item-renderer', timeout=10000)
+        except Exception:
+            if tab in ('shorts', 'live'):
+                # Seen 2026-11: a channel with no streams shows an empty grid, no redirect
+                print(f'[metrics] EMPTY: {tab} tab has no items -> @{handle}')
+                return {'count': 0, 'avg_views': None, 'first_video_url': None}
+            print(f'[metrics] FAILED: {tab} grid never rendered -> @{handle} (count unknown)')
+            return unknown
 
         await asyncio.sleep(_rand_delay(2, 4))
         for _ in range(3):
@@ -483,53 +550,48 @@ async def scrape_tab_metrics(page, handle, tab, days_limit):
         renderers = await page.query_selector_all('ytd-rich-item-renderer')
         print(f'[metrics] Renderers found: {len(renderers)} on {tab} tab')
 
+        first_video_url = None
+        if tab == 'videos' and renderers:
+            href = await renderers[0].eval_on_selector_all(
+                'a[href*="/watch?v="]', 'els => els.length ? els[0].getAttribute("href") : null')
+            if href:
+                first_video_url = href if href.startswith('http') else f'https://www.youtube.com{href}'
+
         in_window_views = []
         in_window_count = 0
+        undated = 0
 
-        for renderer in renderers[:20]:  # sample max 20
+        for renderer in renderers[:20]:  # newest 20
             try:
-                text = await renderer.inner_text()
-                lines = [l.strip() for l in text.splitlines() if l.strip()]
-
-                # Find date line
-                date_line = next(
-                    (l for l in lines if any(w in l.lower() for w in [
-                        'ago', 'hour', 'day', 'week', 'month', 'year',
-                        'วัน', 'สัปดาห์', 'เดือน', 'ปี', 'ชั่วโมง',
-                        'streamed', 'premiered'
-                    ])), None
-                )
-                if not date_line:
-                    continue
-
-                age_days = parse_recency(date_line)
-                if age_days > days_limit:
-                    continue  # outside timeframe
-
-                in_window_count += 1
-
-                # Find view count line
-                view_line = next(
-                    (l for l in lines if any(w in l.lower() for w in [
-                        'view', 'วิว', 'ครั้ง', 'watching'
-                    ])), None
-                )
-                if view_line:
-                    v = parse_view_count(view_line)
-                    if v is not None:
-                        in_window_views.append(v)
-
+                lines = [l.strip() for l in (await renderer.inner_text()).splitlines() if l.strip()]
             except Exception as e:
                 print(f'[metrics] Renderer parse error: {e}')
                 continue
 
+            if tab == 'shorts':
+                v = next((views_from_line(l) for l in lines if views_from_line(l) is not None), None)
+                if v is not None:
+                    in_window_views.append(v)
+                continue
+
+            age_days, views = parse_renderer_lines(lines)
+            if age_days is None:
+                undated += 1
+                continue          # fail-closed: no readable date -> not counted
+            if age_days > days_limit:
+                continue
+            in_window_count += 1
+            if views is not None:
+                in_window_views.append(views)
+
         avg = int(sum(in_window_views) / len(in_window_views)) if in_window_views else None
-        print(f'[metrics] OK: {tab} → count={in_window_count}, avg_views={avg}')
-        return {'count': in_window_count, 'avg_views': avg}
+        count = None if tab == 'shorts' else in_window_count
+        print(f'[metrics] OK: {tab} -> count={count}, avg_views={avg}, undated={undated}')
+        return {'count': count, 'avg_views': avg, 'first_video_url': first_video_url}
 
     except Exception as e:
-        print(f'[metrics] FAILED: {tab} → @{handle} — {e}')
-        return {'count': 0, 'avg_views': None}
+        print(f'[metrics] FAILED: {tab} -> @{handle} — {e}')
+        return unknown
 
 # ---------------------------------------------------------------------------
 # Core scraper
@@ -698,6 +760,8 @@ async def scrape_channels(
                 progress_callback(idx, len(channel_links), f"Checking {handle}")
 
             print(f'[pipeline] Evaluating {handle} ({idx+1}/{len(channel_links)})')
+            # Record before any gate: a rejected channel must not be re-checked next batch
+            processed_handles.add(handle_bare)
 
             await page.goto(ch_url, wait_until="domcontentloaded")
             await asyncio.sleep(random.uniform(3, 5))
@@ -743,14 +807,14 @@ async def scrape_channels(
 
             await asyncio.sleep(_rand_delay(5, 10))
 
-            days_limit = int(activity_filter) if activity_filter != 'any' else 90
+            days_limit = int(activity_filter) if activity_filter != 'any' else 30  # UI shows 30 for 'any'
             vid_metrics = await scrape_tab_metrics(page, handle_bare, 'videos', days_limit)
 
             # Early exit: if zero uploads in timeframe, skip Shorts and Live entirely
             if vid_metrics['count'] == 0:
                 print(f'[pipeline] EARLY EXIT: @{handle_bare} — 0 uploads in last {days_limit}d, skipping Shorts/Live tabs')
-                short_metrics = {'count': 0, 'avg_views': None}
-                live_metrics  = {'count': 0, 'avg_views': None}
+                short_metrics = {'count': 0, 'avg_views': None, 'first_video_url': None}
+                live_metrics  = {'count': 0, 'avg_views': None, 'first_video_url': None}
             else:
                 short_metrics = await scrape_tab_metrics(page, handle_bare, 'shorts', days_limit)
                 live_metrics  = await scrape_tab_metrics(page, handle_bare, 'live',   days_limit)
@@ -760,52 +824,42 @@ async def scrape_channels(
             channel_data['avg_views_shorts'] = short_metrics['avg_views']
             channel_data['avg_views_live']   = live_metrics['avg_views']
 
-            # Category extraction — navigate to first video page
+            # Category: open the first video found on the videos tab (no second /videos load)
             category = None
-            videos_url = f'https://www.youtube.com/@{handle_bare}/videos'
-            try:
-                await page.goto(videos_url, wait_until='domcontentloaded', timeout=20000)
-                first_video_href = None
-                for v_sel in ['a#video-title-link', 'ytd-rich-item-renderer a#thumbnail', 'a[href*="/watch?v="]']:
-                    el = await page.query_selector(v_sel)
-                    if el:
-                        href = await el.get_attribute('href')
-                        if href and '/watch' in href:
-                            first_video_href = href
-                            break
-                if first_video_href:
-                    if first_video_href.startswith('/'):
-                        first_video_href = f'https://www.youtube.com{first_video_href}'
-                    await page.goto(first_video_href, wait_until='networkidle', timeout=30000)
+            first_video = vid_metrics.get('first_video_url')
+            if first_video:
+                try:
+                    await page.goto(first_video, wait_until='domcontentloaded', timeout=30000)
+                    await page.wait_for_selector('meta[itemprop="genre"]', state='attached', timeout=10000)
                     el = await page.query_selector('meta[itemprop="genre"]')
                     if el:
                         category = await el.get_attribute('content')
-                    if not category:
-                        el = await page.query_selector('meta[property="og:video:tag"]')
-                        if el:
-                            category = await el.get_attribute('content')
                     _log_ok("category", category, handle)
-                else:
-                    _log_failed("category", handle, "no first video link found")
-            except Exception as e:
-                _log_failed("category", handle, e)
+                except Exception as e:
+                    _log_failed("category", handle, e)
+            else:
+                _log_failed("category", handle, "no first video link found")
             channel_data["category"] = category or ""
 
-            # Category filter (Rule A) — only skip if category extracted AND doesn't match
+            # Category gate — fail-closed (DECISIONS: Fail-Closed Filter Gates)
             if target_category:
                 if not category:
-                    channel_data["category"] = "Pending Check"
-                    print(f"[scraper] PENDING: category unextractable → {handle}, continuing")
-                elif target_category.lower() not in category.lower():
+                    print(f"[scraper] SKIPPED: {handle} — category unknown, target '{target_category}'")
+                    await asyncio.sleep(_rand_delay(2, 5))
+                    continue
+                if target_category.lower() != category.lower():
                     print(f"[scraper] SKIPPED: {handle} — category '{category}' does not match target '{target_category}'")
                     await asyncio.sleep(_rand_delay(2, 5))
                     continue
+
+            vid_count = vid_metrics['count']
+            per_month = vid_count * 30 / days_limit if isinstance(vid_count, int) else None
 
             channel_data["score"] = _score_channel(
                 channel_data.get("subs"),
                 channel_data.get("avg_views_videos"),
                 channel_data.get("avg_views_shorts"),
-                None,
+                per_month,
                 location_badge,
             )
             channel_data["url"] = ch_canonical_url
@@ -820,7 +874,6 @@ async def scrape_channels(
             results.append(channel_data)
             print(f'[pipeline] ADDED: {handle} — now {len(results)} in results')
 
-            processed_handles.add(handle_bare)
             if len(results) >= batch_size:
                 print(f'[pipeline] CAP: reached {batch_size} results this batch — stopping scrape')
                 break
