@@ -150,3 +150,80 @@ def keywords_for(handle: str) -> list[str]:
     except sqlite3.Error as e:
         raise LibraryUnavailable(str(e)) from e
     return [r[0] for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Browsing (Library page)
+# ---------------------------------------------------------------------------
+
+def list_channels(now: datetime | None = None) -> list[dict]:
+    """Every fully checked channel (stage complete), newest check first, with
+    the keywords that surfaced it and whether its data is stale."""
+    now = now or _now()
+    try:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT c.handle, c.facts, c.checked_at, "
+                "       (SELECT group_concat(keyword, char(31)) FROM "
+                "          (SELECT keyword FROM sightings s WHERE s.handle = c.handle "
+                "           ORDER BY first_seen, rowid)) "
+                "FROM channels c WHERE c.stage = ? ORDER BY c.checked_at DESC",
+                (STAGE_COMPLETE,)).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as e:
+        raise LibraryUnavailable(str(e)) from e
+
+    out = []
+    for handle, facts_json, checked_at, kws in rows:
+        try:
+            facts = json.loads(facts_json)
+            age = now - datetime.fromisoformat(checked_at)
+        except (ValueError, TypeError):
+            continue
+        facts["handle"] = facts.get("handle") or handle
+        facts["checked_at"] = checked_at
+        facts["stale"] = age > timedelta(days=FRESH_DAYS)
+        facts["keywords"] = kws.split("\x1f") if kws else []
+        out.append(facts)
+    return out
+
+
+def filter_channels(rows: list[dict], keyword: str = "", category: str = "",
+                    tier_range: tuple[int, int] | None = None,
+                    th_only: bool = False) -> list[dict]:
+    """Pure filter for the Library page. Unknown values never match a filter
+    that is set (fail-closed), and match everything when the filter is empty."""
+    out = []
+    for r in rows:
+        if keyword and keyword not in r.get("keywords", []):
+            continue
+        if category and (r.get("category") or "").lower() != category.lower():
+            continue
+        if tier_range:
+            subs = r.get("subs")
+            if not isinstance(subs, int) or not (tier_range[0] <= subs <= tier_range[1]):
+                continue
+        if th_only and not r.get("th_signal"):
+            continue
+        out.append(r)
+    return out
+
+
+def stats() -> dict:
+    """Totals for the Library header."""
+    try:
+        conn = _connect()
+        try:
+            total = conn.execute("SELECT count(*) FROM channels").fetchone()[0]
+            complete = conn.execute("SELECT count(*) FROM channels WHERE stage = ?",
+                                    (STAGE_COMPLETE,)).fetchone()[0]
+            keywords = [r[0] for r in conn.execute(
+                "SELECT keyword FROM sightings GROUP BY keyword ORDER BY min(first_seen), min(rowid)")]
+        finally:
+            conn.close()
+    except sqlite3.Error as e:
+        raise LibraryUnavailable(str(e)) from e
+    return {"checked": total, "complete": complete, "rejected_early": total - complete,
+            "keywords": keywords}

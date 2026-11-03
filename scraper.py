@@ -273,13 +273,18 @@ def evaluate_cached(facts, stage, region, sub_tier, target_category, days_limit)
     ok, reason = gate_category(facts.get('category') or None, target_category)
     if not ok:
         return 'reject', reason
-    count = facts.get('upload_frequency')
-    per_month = count * 30 / days_limit if isinstance(count, int) else None
     row = dict(facts)
-    row['score'] = _score_channel(facts.get('subs'), facts.get('avg_views_videos'),
-                                  facts.get('avg_views_shorts'), per_month,
-                                  facts.get('location_badge'))
+    row['score'] = score_from_facts(facts)
     return 'pass', row
+
+
+def score_from_facts(facts) -> int:
+    """Score from stored facts, using the window the metrics were taken over."""
+    count, days = facts.get('upload_frequency'), facts.get('metrics_days')
+    per_month = count * 30 / days if isinstance(count, int) and days else None
+    return _score_channel(facts.get('subs'), facts.get('avg_views_videos'),
+                          facts.get('avg_views_shorts'), per_month,
+                          facts.get('location_badge'))
 
 
 _library_ok = True

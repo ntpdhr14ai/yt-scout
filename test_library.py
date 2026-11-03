@@ -113,3 +113,70 @@ def test_category_filter_applied_to_stored_category():
 def test_unknown_stored_category_rejected_when_target_set():
     facts = {**COMPLETE, "category": ""}
     assert ev(facts, library.STAGE_COMPLETE, cat="Travel & Events")[0] == "reject"
+
+
+# --- Library page ----------------------------------------------------------------
+
+def _seed():
+    library.save("GoWentGo", COMPLETE, library.STAGE_COMPLETE, now=NOW)
+    library.save("small", {**COMPLETE, "handle": "small", "name": "Small TH", "subs": 8_000,
+                           "category": "People & Blogs"}, library.STAGE_COMPLETE, now=NOW)
+    library.save("foreign", {**COMPLETE, "handle": "foreign", "th_signal": False,
+                             "location_badge": "?"}, library.STAGE_COMPLETE,
+                 now=NOW - timedelta(days=20))
+    library.save("early", {"handle": "early", "subs": 1}, library.STAGE_SUBS, now=NOW)
+    library.record_sighting("GoWentGo", "เที่ยวไทย", "t", "u", now=NOW)
+    library.record_sighting("GoWentGo", "thai vlog", "t", "u", now=NOW)
+    library.record_sighting("small", "thai vlog", "t", "u", now=NOW)
+
+
+def test_list_channels_only_complete_with_keywords_and_staleness():
+    _seed()
+    rows = {r["handle"]: r for r in library.list_channels(now=NOW)}
+    assert set(rows) == {"GoWentGo", "small", "foreign"}          # "early" excluded
+    assert rows["GoWentGo"]["keywords"] == ["เที่ยวไทย", "thai vlog"]
+    assert rows["foreign"]["stale"] is True and rows["small"]["stale"] is False
+
+
+def test_filter_channels():
+    _seed()
+    rows = library.list_channels(now=NOW)
+    names = lambda rs: sorted(r["handle"] for r in rs)
+    assert names(library.filter_channels(rows, keyword="thai vlog")) == ["GoWentGo", "small"]
+    assert names(library.filter_channels(rows, category="people & blogs")) == ["small"]
+    assert names(library.filter_channels(rows, tier_range=(5001, 10000))) == ["small"]
+    assert names(library.filter_channels(rows, th_only=True)) == ["GoWentGo", "small"]
+
+
+def test_filter_fail_closed_on_unknown_subs():
+    rows = [{"handle": "x", "subs": None}]
+    assert library.filter_channels(rows, tier_range=(0, 5000)) == []
+    assert len(library.filter_channels(rows)) == 1
+
+
+def test_stats():
+    _seed()
+    s = library.stats()
+    assert (s["checked"], s["complete"], s["rejected_early"]) == (4, 3, 1)
+    assert s["keywords"] == ["เที่ยวไทย", "thai vlog"]
+
+
+def test_library_routes():
+    import app
+    _seed()
+    c = app.app.test_client()
+    assert c.get("/library").status_code == 200
+    data = c.get("/library/data?th_only=1").get_json()
+    assert sorted(r["handle"] for r in data["rows"]) == ["GoWentGo", "small"]
+    scores = [r["score"] for r in data["rows"]]
+    assert scores == sorted(scores, reverse=True)                         # best score first
+    csv_text = c.get("/library/export/csv?keyword=thai%20vlog").get_data(as_text=True)
+    assert csv_text.startswith("﻿")                                   # Excel-friendly Thai
+    assert "GoWentGo" in csv_text and "foreign" not in csv_text
+
+
+def test_library_route_reports_unavailable_storage(monkeypatch, tmp_path):
+    import app
+    monkeypatch.setenv("YT_SCOUT_DB", str(tmp_path / "missing" / "x.db"))
+    resp = app.app.test_client().get("/library/data")
+    assert resp.status_code == 503 and "unavailable" in resp.get_json()["error"]

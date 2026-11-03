@@ -7,6 +7,7 @@ import time
 import traceback
 from flask import Flask, jsonify, render_template, request, Response
 
+import library
 import scraper
 from scraper import scrape_channels, MAX_CHANNELS_PER_BATCH, COOLDOWN_SECONDS, discovery_queue
 
@@ -266,6 +267,70 @@ def export_excel():
         buf,
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": "attachment; filename=yt_scout_results.xlsx"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Library (every channel checked in past runs)
+# ---------------------------------------------------------------------------
+
+def _library_rows():
+    """Filtered library rows from query args, best score first."""
+    tier = request.args.get("tier", "any")
+    rows = library.filter_channels(
+        library.list_channels(),
+        keyword=request.args.get("keyword", ""),
+        category=request.args.get("category", ""),
+        tier_range=scraper.SUBSCRIBER_TIERS.get(tier),
+        th_only=request.args.get("th_only") == "1",
+    )
+    for r in rows:
+        r["score"] = scraper.score_from_facts(r)
+    rows.sort(key=lambda r: r["score"], reverse=True)
+    return rows
+
+
+@app.route("/library")
+def library_page():
+    return render_template("library.html")
+
+
+@app.route("/library/data")
+def library_data():
+    try:
+        return jsonify({"stats": library.stats(), "rows": _library_rows()})
+    except library.LibraryUnavailable as e:
+        return jsonify({"error": f"Library unavailable: {e}"}), 503
+
+
+@app.route("/library/export/csv")
+def library_export_csv():
+    try:
+        rows = _library_rows()
+    except library.LibraryUnavailable as e:
+        return Response(f"Library unavailable: {e}", status=503)
+    headers = ["Channel", "Handle", "URL", "Subscribers", "Location", "Category",
+               "Upload Frequency", "Window (days)", "Avg Views Videos", "Avg Views Shorts",
+               "Avg Views Live", "Score", "Keywords", "Checked At", "Stale", "Contact"]
+    output = io.StringIO()
+    output.write("\ufeff")  # BOM so Excel opens Thai text correctly
+    w = csv.writer(output)
+    w.writerow(headers)
+    for r in rows:
+        w.writerow([
+            _fmt(r.get("name")), _fmt(r.get("handle")), _fmt(r.get("url")),
+            _fmt(r.get("subs")), _fmt(r.get("location_badge")), _fmt(r.get("category")),
+            _fmt(r.get("upload_frequency")), _fmt(r.get("metrics_days")),
+            _fmt(r.get("avg_views_videos")), _fmt(r.get("avg_views_shorts")),
+            _fmt(r.get("avg_views_live")), r.get("score"),
+            "; ".join(r.get("keywords") or []), r.get("checked_at"),
+            "yes" if r.get("stale") else "no",
+            "; ".join(list(r.get("emails") or []) + list(r.get("links") or [])) or "—",
+        ])
+    return Response(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": "attachment; filename=yt_scout_library.csv"},
     )
 
 
