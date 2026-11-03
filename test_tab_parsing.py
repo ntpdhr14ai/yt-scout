@@ -51,3 +51,30 @@ def test_upload_frequency_now_scores():
     # 10 videos / 30 days -> 10 per month -> +15 (was always 0 before)
     assert _score_channel(20_000, None, None, 10.0, None) == 15 + 15
     assert _score_channel(20_000, None, None, None, None) == 15
+
+
+# --- fallback grid (2026-11-03 run: one channel had identical stats on all 3 tabs) ---
+from scraper import video_id, is_fallback_grid
+
+V = "https://www.youtube.com/watch?v=_x9bqjT2YVQ"
+
+
+def test_video_id():
+    assert video_id("/watch?v=_x9bqjT2YVQ") == "_x9bqjT2YVQ"
+    assert video_id("/watch?v=_x9bqjT2YVQ&t=5s") == "_x9bqjT2YVQ"
+    assert video_id("/shorts/abcdefghijk") == "abcdefghijk"
+    assert video_id(None) is None
+
+
+def test_live_tab_showing_videos_grid_is_detected():
+    assert is_fallback_grid("live", "/watch?v=_x9bqjT2YVQ", V) is True
+
+
+def test_shorts_tab_with_watch_links_is_detected():
+    assert is_fallback_grid("shorts", "/watch?v=bFqHr7JkLik", V) is True
+
+
+def test_real_tabs_are_kept():
+    assert is_fallback_grid("shorts", "/shorts/abcdefghijk", V) is False
+    assert is_fallback_grid("live", "/watch?v=LIVEstream01", V) is False
+    assert is_fallback_grid("live", None, V) is False

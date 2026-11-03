@@ -502,7 +502,25 @@ async def _scrape_about(page, ch_url: str, handle: str, region: str = '') -> tup
 
     return data, True, location_badge
 
-async def scrape_tab_metrics(page, handle, tab, days_limit):
+_VIDEO_ID_RE = re.compile(r"(?:[?&]v=|/shorts/)([\w-]{11})")
+
+
+def video_id(href: str | None) -> str | None:
+    m = _VIDEO_ID_RE.search(href or "")
+    return m.group(1) if m else None
+
+
+def is_fallback_grid(tab: str, first_href: str | None, videos_first_href: str | None) -> bool:
+    """True when a shorts/live URL is really showing the videos grid.
+    Seen 2026-11: a channel without those tabs served the videos grid at
+    /shorts and /streams with no redirect, so all three tabs had equal stats."""
+    if tab == 'shorts' and first_href and '/shorts/' not in first_href:
+        return True
+    vid = video_id(first_href)
+    return vid is not None and vid == video_id(videos_first_href)
+
+
+async def scrape_tab_metrics(page, handle, tab, days_limit, videos_first_href=None):
     '''
     Visit a channel tab and read the grid items.
     Returns {count, avg_views, first_video_url}
@@ -551,17 +569,23 @@ async def scrape_tab_metrics(page, handle, tab, days_limit):
         print(f'[metrics] Renderers found: {len(renderers)} on {tab} tab')
 
         first_video_url = None
-        if tab == 'videos' and renderers:
+        if renderers:
             href = await renderers[0].eval_on_selector_all(
-                'a[href*="/watch?v="]', 'els => els.length ? els[0].getAttribute("href") : null')
+                'a[href*="/watch?v="], a[href*="/shorts/"]',
+                'els => els.length ? els[0].getAttribute("href") : null')
             if href:
                 first_video_url = href if href.startswith('http') else f'https://www.youtube.com{href}'
+
+        if tab in ('shorts', 'live') and is_fallback_grid(tab, first_video_url, videos_first_href):
+            print(f'[metrics] EMPTY: {tab} tab is showing the videos grid -> @{handle}')
+            return {'count': 0, 'avg_views': None, 'first_video_url': None}
 
         in_window_views = []
         in_window_count = 0
         undated = 0
 
-        for renderer in renderers[:20]:  # newest 20
+        sample = renderers[:20] if tab == 'shorts' else renderers  # all loaded items (~30)
+        for renderer in sample:
             try:
                 lines = [l.strip() for l in (await renderer.inner_text()).splitlines() if l.strip()]
             except Exception as e:
@@ -816,8 +840,9 @@ async def scrape_channels(
                 short_metrics = {'count': 0, 'avg_views': None, 'first_video_url': None}
                 live_metrics  = {'count': 0, 'avg_views': None, 'first_video_url': None}
             else:
-                short_metrics = await scrape_tab_metrics(page, handle_bare, 'shorts', days_limit)
-                live_metrics  = await scrape_tab_metrics(page, handle_bare, 'live',   days_limit)
+                first = vid_metrics.get('first_video_url')
+                short_metrics = await scrape_tab_metrics(page, handle_bare, 'shorts', days_limit, first)
+                live_metrics  = await scrape_tab_metrics(page, handle_bare, 'live',   days_limit, first)
 
             channel_data['upload_frequency'] = vid_metrics['count']
             channel_data['avg_views_videos'] = vid_metrics['avg_views']
